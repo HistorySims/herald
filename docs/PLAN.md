@@ -579,6 +579,7 @@ A failure on any of #1–#8 or #10 blocks Phase 2; #9 is a hard blocker for any 
 ### Phase 3 — Credits, auth, vision OCR
 
 - Supabase Auth (email link / OAuth) wired to the existing `users` table.
+- **Row Level Security policies** for `users`, `credit_ledger`, and `reocr_jobs`. Tables were created in Phase 1 *without* RLS (intentionally — `service_role` bypasses RLS and there is no public frontend yet). Policies must be defined and enabled **before the `anon` key is exposed to the browser**. At minimum: a user may read/update their own `users` row; a user may read their own `credit_ledger` rows but never insert (writes go through the credit-spend stored procedure under `service_role`); a user may read their own `reocr_jobs` rows and `pages.reocr_status` is publicly readable.
 - Stripe Checkout for credit packs.
 - Vision-OCR worker (Claude Sonnet 4.6 vision is the leading candidate; final pick is a Phase-3-day-1 bake-off vs. GPT-4o-vision-class alternatives on a 50-page sample).
 - "Clean this page" button in the UI; transactional credit deduction; async result delivery; staleness badges on old citations.
@@ -600,6 +601,7 @@ A failure on any of #1–#8 or #10 blocks Phase 2; #9 is a hard blocker for any 
 - **Article-boundary detection is deferred, not impossible.** Once a meaningful share of pages have been Cleaned in Phase 3, a downstream pass could rebuild article structure from cleaned text. Out of scope for now.
 - **Demo data exclusivity.** "Optional attribution but no exclusive rights" is a product position, not legal text. We need a one-paragraph plain-English TOS for credit-purchasers before Phase 3 ships.
 - **Multi-paper schema validated on day one.** With two papers in Phase 1 (instead of one), we exercise the `papers` table, `paper_id` filtering, and cross-paper synthesis from the start. Lower risk of multi-paper bugs appearing later when we add a third corpus.
+- **RLS is deliberately absent in Phase 1.** All Phase 1 tables were created without Row Level Security. This is safe today because (a) all writes go through `service_role`, which bypasses RLS, and (b) there is no browser-facing client — only the CLI. **Before the Phase 2/3 web frontend uses the `anon` key, RLS policies must be written and enabled** for `users`, `credit_ledger`, and `reocr_jobs` (see Phase 3 scope above). Shipping a public anon key against unprotected tables would leak credit balances and other users' job history.
 
 ---
 
