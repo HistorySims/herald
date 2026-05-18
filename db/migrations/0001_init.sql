@@ -4,6 +4,11 @@
 -- Tables: papers, users, issues, pages, chunks, credit_ledger, reocr_jobs
 -- See docs/PLAN.md §5 for rationale and index notes.
 --
+-- NOTE: chunks.embedding is vector(1024), sized for Voyage-3-family
+-- embedding models. Changing embedding models (e.g. dimensionality or
+-- vendor) requires a migration and a full re-embed of the corpus —
+-- never mix versions in one HNSW index. See docs/PLAN.md §7.
+--
 -- Apply with:
 --   psql "$SUPABASE_DB_URL" -f db/migrations/0001_init.sql
 -- ============================================================
@@ -11,6 +16,15 @@
 -- Extensions ---------------------------------------------------
 create extension if not exists vector;     -- pgvector
 create extension if not exists pgcrypto;   -- gen_random_uuid()
+
+-- Shared trigger function for auto-maintained updated_at columns
+create or replace function set_updated_at() returns trigger
+language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
 
 -- papers -------------------------------------------------------
 create table if not exists papers (
@@ -70,6 +84,12 @@ create table if not exists pages (
 create index if not exists pages_reocr_idx on pages (reocr_status)
   where reocr_status <> 'original';
 
+-- Auto-maintain updated_at on pages
+drop trigger if exists pages_set_updated_at on pages;
+create trigger pages_set_updated_at
+  before update on pages
+  for each row execute function set_updated_at();
+
 -- chunks -------------------------------------------------------
 create table if not exists chunks (
   id           uuid primary key default gen_random_uuid(),
@@ -91,7 +111,11 @@ create index if not exists chunks_hnsw_idx on chunks
 create index if not exists chunks_fts_idx on chunks
   using gin (fts)
   where is_current = true;
-create index if not exists chunks_page_idx on chunks (page_id);
+-- No separate chunks_page_idx: the unique constraint on
+-- (page_id, ocr_version, chunk_index) already provides a btree
+-- whose leading column is page_id. Drop it explicitly in case an
+-- earlier version of this migration created one.
+drop index if exists chunks_page_idx;
 
 -- credit_ledger (append-only) ----------------------------------
 create table if not exists credit_ledger (
