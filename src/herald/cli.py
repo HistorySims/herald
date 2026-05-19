@@ -1,8 +1,9 @@
 """Herald CLI.
 
 Phase 1 surface:
-- ``herald ingest --lccn <lccn> --from YYYY-MM-DD --to YYYY-MM-DD``
+- ``herald ingest --lccn <lccn> --from YYYY-MM-DD --to YYYY-MM-DD [--no-dry-run]``
 - ``herald ask "<question>"``  (stub — wired in a later slice)
+- ``herald normalize-text <path>`` (debug helper)
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ from datetime import date
 import typer
 from rich.console import Console
 
-from herald import normalize, settings
-from herald.loc import LOCClient
+from herald import db, normalize, settings
+from herald.embed import VoyageEmbedder
+from herald.ingest import ingest_paper
+from herald.loc import LOCClient, PageRef
 
 app = typer.Typer(
     add_completion=False,
@@ -32,7 +35,7 @@ def ingest(
     dry_run: bool = typer.Option(
         True,
         "--dry-run/--no-dry-run",
-        help="Enumerate only, do not write to DB. Default True until the DB write slice lands.",
+        help="Dry-run enumerates issues only. --no-dry-run writes to Supabase.",
     ),
 ) -> None:
     """Ingest a paper from Chronicling America into Supabase."""
@@ -40,8 +43,21 @@ def ingest(
     asyncio.run(_ingest(cfg, lccn, _parse_date(date_from), _parse_date(date_to), dry_run))
 
 
-async def _ingest(cfg: settings.Settings, lccn: str, df: date, dt: date, dry_run: bool) -> None:
+async def _ingest(
+    cfg: settings.Settings, lccn: str, df: date, dt: date, dry_run: bool
+) -> None:
+    if dry_run:
+        await _ingest_dry_run(cfg, lccn, df, dt)
+        return
+    await _ingest_full(cfg, lccn, df, dt)
+
+
+async def _ingest_dry_run(
+    cfg: settings.Settings, lccn: str, df: date, dt: date
+) -> None:
     async with LOCClient(user_agent=cfg.loc_user_agent) as loc:
+        meta = await loc.get_paper_metadata(lccn)
+        console.print(f"[bold]{meta.title}[/bold]  ({meta.lccn})  {meta.place or '-'}")
         issue_count = 0
         page_count = 0
         async for issue in loc.iter_issues(lccn, date_from=df, date_to=dt):
@@ -49,17 +65,66 @@ async def _ingest(cfg: settings.Settings, lccn: str, df: date, dt: date, dry_run
             pages = await loc.list_pages(issue)
             page_count += len(pages)
             console.print(
-                f"{issue.lccn} {issue.date_issued} ed-{issue.edition}  "
-                f"pages={len(pages)}"
+                f"  {issue.date_issued} ed-{issue.edition}  pages={len(pages)}"
             )
-            if not dry_run:
-                console.print(
-                    "[red]DB write path not yet implemented — re-run with --dry-run.[/red]"
-                )
-                raise typer.Exit(code=2)
     console.print(
-        f"\n[bold]done[/bold]  issues={issue_count}  pages={page_count}  "
-        f"({'dry run' if dry_run else 'persisted'})"
+        f"\n[bold]dry run done[/bold]  issues={issue_count}  pages={page_count}"
+    )
+
+
+async def _ingest_full(
+    cfg: settings.Settings, lccn: str, df: date, dt: date
+) -> None:
+    if not cfg.supabase_db_url:
+        raise typer.BadParameter(
+            "SUPABASE_DB_URL is not set. See README for setup."
+        )
+    if not cfg.voyage_api_key:
+        raise typer.BadParameter(
+            "VOYAGE_API_KEY is not set. See README for setup."
+        )
+
+    conn = db.connect(cfg.supabase_db_url)
+    try:
+        async with (
+            LOCClient(user_agent=cfg.loc_user_agent) as loc,
+            VoyageEmbedder(api_key=cfg.voyage_api_key) as voyage,
+        ):
+            meta = await loc.get_paper_metadata(lccn)
+            console.print(
+                f"[bold]{meta.title}[/bold]  ({meta.lccn})  {meta.place or '-'}"
+            )
+            console.print(f"  window: {df}  →  {dt}\n")
+
+            def _on_page(p: PageRef, status: str) -> None:
+                color = {"skipped": "dim", "written": "green", "empty": "yellow"}.get(
+                    status, "white"
+                )
+                console.print(
+                    f"  [{color}]{status:>7}[/]  {p.date_issued} ed-{p.edition} seq-{p.sequence}"
+                )
+
+            stats = await ingest_paper(
+                loc=loc,
+                voyage=voyage,
+                conn=conn,
+                lccn=meta.lccn,
+                title=meta.title,
+                place=meta.place,
+                start_year=meta.start_year,
+                end_year=meta.end_year,
+                date_from=df,
+                date_to=dt,
+                on_page=_on_page,
+            )
+    finally:
+        conn.close()
+
+    console.print(
+        f"\n[bold green]done[/bold green]  "
+        f"issues={stats.issues_seen}  pages_seen={stats.pages_seen}  "
+        f"written={stats.pages_written}  skipped={stats.pages_skipped}  "
+        f"chunks={stats.chunks_written}"
     )
 
 
