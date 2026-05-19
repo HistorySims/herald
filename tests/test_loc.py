@@ -15,6 +15,21 @@ def _load(name: str) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_get_paper_metadata(httpx_mock):
+    httpx_mock.add_response(
+        url="https://chroniclingamerica.loc.gov/lccn/sn83030213.json",
+        json=_load("lccn_sn83030213.json"),
+    )
+    async with LOCClient(user_agent="test/1.0") as loc:
+        meta = await loc.get_paper_metadata("sn83030213")
+    assert meta.lccn == "sn83030213"
+    assert meta.title == "New-York daily tribune"
+    assert meta.place == "New-York [N.Y.]"
+    assert meta.start_year == 1842
+    assert meta.end_year == 1866
+
+
+@pytest.mark.asyncio
 async def test_iter_issues_filters_by_date_window(httpx_mock):
     httpx_mock.add_response(
         url="https://chroniclingamerica.loc.gov/lccn/sn83030213.json",

@@ -19,6 +19,15 @@ BASE = "https://chroniclingamerica.loc.gov"
 
 
 @dataclass(frozen=True)
+class PaperMetadata:
+    lccn: str
+    title: str
+    place: str | None
+    start_year: int | None
+    end_year: int | None
+
+
+@dataclass(frozen=True)
 class IssueRef:
     lccn: str
     date_issued: date
@@ -65,6 +74,17 @@ class LOCClient:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def get_paper_metadata(self, lccn: str) -> PaperMetadata:
+        """Fetch top-level metadata for an LCCN (title, place, year range)."""
+        data = await self._get_json(f"/lccn/{lccn}.json")
+        return PaperMetadata(
+            lccn=lccn,
+            title=(data.get("name") or "").strip().rstrip(".") or lccn,
+            place=(data.get("place_of_publication") or None),
+            start_year=_to_int(data.get("start_year")),
+            end_year=_to_int(data.get("end_year")),
+        )
 
     async def iter_issues(
         self,
@@ -154,3 +174,12 @@ def _sequence_from_url(url: str) -> int:
 
 def _to_json(url: str) -> str:
     return url.rstrip("/") + ".json"
+
+
+def _to_int(v: object) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
