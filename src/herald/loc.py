@@ -34,8 +34,14 @@ import httpx
 BASE = "https://www.loc.gov"
 LEGACY_BASE = "https://chroniclingamerica.loc.gov"
 COLLECTION_PATH = "/collections/chronicling-america/"
-DEFAULT_PER_PAGE = 200
+# LOC's dl=page responses inline full_text per result; at c=200 the bodies
+# routinely exceed 4 MB and the server closes the connection mid-stream
+# (RemoteProtocolError: received 57075/4223823). 25 keeps each response
+# under a few hundred KB and stays well within the 20-per-10s rate limit.
+DEFAULT_PER_PAGE = 25
 DEFAULT_MIN_INTERVAL_SECS = 0.6  # ≈ 1.6 req/sec, well under 2 req/sec sustained
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_RETRY_BASE_DELAY = 1.0
 
 
 @dataclass(frozen=True)
@@ -80,11 +86,15 @@ class LOCClient:
         legacy_base_url: str = LEGACY_BASE,
         per_page: int = DEFAULT_PER_PAGE,
         min_request_interval: float = DEFAULT_MIN_INTERVAL_SECS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._legacy = legacy_base_url.rstrip("/")
         self._per_page = per_page
         self._min_interval = min_request_interval
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             headers={"User-Agent": user_agent, "Accept": "application/json"},
@@ -322,14 +332,53 @@ class LOCClient:
         )
 
     async def _get_json(self, path: str, *, params=None) -> dict:
-        resp = await self._get_with_params(path, params=params)
+        resp = await self._get_with_retry(path, params=params)
         resp.raise_for_status()
         return resp.json()
 
-    async def _get_with_params(self, path: str, *, params=None) -> httpx.Response:
+    async def _get_with_retry(self, path: str, *, params=None) -> httpx.Response:
+        """GET with exponential backoff on transient transport errors.
+
+        LOC's search endpoint occasionally closes the connection mid-body
+        (RemoteProtocolError); we also retry read timeouts and 5xx.
+        4xx is non-retryable.
+        """
         url = path if path.startswith("http") else f"{self._base}{path}"
-        await self._throttle()
-        return await self._client.get(url, params=params)
+        delay = self._retry_base_delay
+        last: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            await self._throttle()
+            try:
+                resp = await self._client.get(url, params=params)
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ReadTimeout,
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+            ) as e:
+                last = e
+                if attempt >= self._max_retries:
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            if resp.status_code >= 500:
+                last = httpx.HTTPStatusError(
+                    f"loc {resp.status_code}", request=resp.request, response=resp,
+                )
+                if attempt >= self._max_retries:
+                    raise last
+                ra = resp.headers.get("retry-after")
+                if ra and ra.isdigit():
+                    await asyncio.sleep(int(ra))
+                else:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                continue
+            return resp
+        # Loop always returns or raises; unreachable.
+        raise last or RuntimeError("loc retry loop terminated unexpectedly")
 
     async def _get(self, url: str) -> httpx.Response:
         await self._throttle()
