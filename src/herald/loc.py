@@ -42,6 +42,11 @@ DEFAULT_PER_PAGE = 25
 DEFAULT_MIN_INTERVAL_SECS = 0.6  # ≈ 1.6 req/sec, well under 2 req/sec sustained
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_RETRY_BASE_DELAY = 1.0
+# Hard cap on paginated search depth. With c=25 this is 2500 results — well
+# above what any reasonable date window should produce. If we ever blow past
+# it, LOC's date filter is being ignored and we should fail fast rather than
+# hammer the API for an hour.
+DEFAULT_MAX_PAGINATION_DEPTH = 100
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,7 @@ class LOCClient:
         min_request_interval: float = DEFAULT_MIN_INTERVAL_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
+        max_pagination_depth: int = DEFAULT_MAX_PAGINATION_DEPTH,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._legacy = legacy_base_url.rstrip("/")
@@ -95,6 +101,7 @@ class LOCClient:
         self._min_interval = min_request_interval
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
+        self._max_pagination_depth = max_pagination_depth
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             headers={"User-Agent": user_agent, "Accept": "application/json"},
@@ -221,10 +228,24 @@ class LOCClient:
         date_from: date | None,
         date_to: date | None,
     ) -> AsyncIterator[tuple[IssueRef, list[PageRef]]]:
-        """Iterate (issue, pages) pairs by paginating the search endpoint."""
+        """Iterate (issue, pages) pairs by paginating the search endpoint.
+
+        Belt-and-suspenders date filtering:
+        - We pass ``start_date``/``end_date`` and ``dates=YYYY/YYYY`` to LOC,
+          but the API has been observed ignoring both — we've seen a 9-day
+          window return the entire 24-year title.
+        - So we also filter client-side here. The API filter, if honored,
+          reduces transferred bytes; the client filter is the source of truth.
+        - A hard pagination cap (``max_pagination_depth``) aborts with a
+          clear error if we'd otherwise drown in unfiltered results.
+        """
         page = 1
         current_key: tuple[date, int] | None = None
         current_pages: list[PageRef] = []
+        # Trip flag — once we've passed beyond date_to in a sorted stream, we
+        # can stop early. Not relied on (API order isn't guaranteed) but a
+        # cheap optimization.
+        seen_in_window = False
 
         def _finalize() -> tuple[IssueRef, list[PageRef]] | None:
             if current_key is None or not current_pages:
@@ -237,16 +258,31 @@ class LOCClient:
             return issue, list(current_pages)
 
         while True:
+            if page > self._max_pagination_depth:
+                raise RuntimeError(
+                    f"LOC search pagination exceeded {self._max_pagination_depth} "
+                    f"pages for lccn={lccn} window {date_from}..{date_to}. "
+                    "The date filter is likely being ignored server-side; "
+                    "client-side filter found no in-window results either."
+                )
             params = self._search_params(
                 lccn=lccn, date_from=date_from, date_to=date_to,
                 page=page, per_page=self._per_page,
             )
             data = await self._get_json(COLLECTION_PATH, params=params)
             results = data.get("results", []) or []
+            page_yielded_any_in_window = False
             for r in results:
                 pref = self._page_ref_from_result(r, lccn=lccn)
                 if pref is None:
                     continue
+                # Client-side date filter — authoritative.
+                if date_from and pref.date_issued < date_from:
+                    continue
+                if date_to and pref.date_issued > date_to:
+                    continue
+                page_yielded_any_in_window = True
+                seen_in_window = True
                 key = (pref.date_issued, pref.edition)
                 if current_key is None:
                     current_key = key
@@ -261,6 +297,12 @@ class LOCClient:
 
             nxt = (data.get("pagination") or {}).get("next")
             if not nxt or not results:
+                break
+            # If we've already collected in-window results AND this page had
+            # zero, the stream has moved past our window — stop. This makes
+            # bounded windows finish quickly even when the API ignores the
+            # date filter.
+            if seen_in_window and not page_yielded_any_in_window:
                 break
             page += 1
 
@@ -299,6 +341,12 @@ class LOCClient:
             params.append(("start_date", date_from.isoformat()))
         if date_to:
             params.append(("end_date", date_to.isoformat()))
+        # LOC's docs describe both ``start_date``/``end_date`` and ``dates=YYYY/YYYY``
+        # — the former has been observed to be ignored on the chronam collection
+        # endpoint, so we add the year-range form too. Whichever the server
+        # actually honors, we win; the client-side filter is the final word.
+        if date_from and date_to:
+            params.append(("dates", f"{date_from.year}/{date_to.year}"))
         return params
 
     def _page_ref_from_result(self, r: dict, *, lccn: str) -> PageRef | None:
@@ -363,7 +411,7 @@ class LOCClient:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if resp.status_code >= 500:
+            if resp.status_code == 429 or resp.status_code >= 500:
                 last = httpx.HTTPStatusError(
                     f"loc {resp.status_code}", request=resp.request, response=resp,
                 )
@@ -371,9 +419,12 @@ class LOCClient:
                     raise last
                 ra = resp.headers.get("retry-after")
                 if ra and ra.isdigit():
-                    await asyncio.sleep(int(ra))
+                    # Honor LOC's hint, with a 60s floor so we don't hammer.
+                    await asyncio.sleep(max(int(ra), 1))
                 else:
-                    await asyncio.sleep(delay)
+                    # 429 deserves a heavier base than 5xx — pad it.
+                    pad = 5.0 if resp.status_code == 429 else 0.0
+                    await asyncio.sleep(delay + pad)
                     delay *= 2
                 continue
             return resp
