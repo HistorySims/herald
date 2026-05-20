@@ -25,6 +25,7 @@ def _client() -> LOCClient:
         user_agent="test/1.0",
         min_request_interval=0.0,
         retry_base_delay=0.0,
+        rate_limit_pad_secs=0.0,
     )
 
 
@@ -33,6 +34,7 @@ def _client_low_cap() -> LOCClient:
         user_agent="test/1.0",
         min_request_interval=0.0,
         retry_base_delay=0.0,
+        rate_limit_pad_secs=0.0,
         max_pagination_depth=3,
     )
 
@@ -258,8 +260,8 @@ async def test_pagination_follows_next_marker(httpx_mock):
 @pytest.mark.asyncio
 async def test_get_json_raises_on_http_error(httpx_mock):
     # 5xx is retried up to max_retries+1 times before bubbling up; configure
-    # enough mock responses to satisfy each attempt.
-    for _ in range(6):
+    # enough mock responses to satisfy each attempt (default max_retries=8).
+    for _ in range(9):
         httpx_mock.add_response(
             url=re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*"),
             status_code=500,

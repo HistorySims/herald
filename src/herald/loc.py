@@ -34,14 +34,17 @@ import httpx
 BASE = "https://www.loc.gov"
 LEGACY_BASE = "https://chroniclingamerica.loc.gov"
 COLLECTION_PATH = "/collections/chronicling-america/"
-# LOC's dl=page responses inline full_text per result; at c=200 the bodies
-# routinely exceed 4 MB and the server closes the connection mid-stream
-# (RemoteProtocolError: received 57075/4223823). 25 keeps each response
-# under a few hundred KB and stays well within the 20-per-10s rate limit.
+# LOC's Newspapers endpoint advertises two limits: 20 requests per 10
+# seconds (burst) and 20 requests per 1 minute (sustained). The sustained
+# limit is the binding one — we need an average of ≤ 1 request per 3
+# seconds. We previously ran at 0.6s and tripped 429s after a few minutes.
 DEFAULT_PER_PAGE = 25
-DEFAULT_MIN_INTERVAL_SECS = 0.6  # ≈ 1.6 req/sec, well under 2 req/sec sustained
-DEFAULT_MAX_RETRIES = 5
-DEFAULT_RETRY_BASE_DELAY = 1.0
+DEFAULT_MIN_INTERVAL_SECS = 3.0
+DEFAULT_MAX_RETRIES = 8
+DEFAULT_RETRY_BASE_DELAY = 2.0
+# When LOC sends 429, we wait this long on top of any exponential delay,
+# in addition to honoring the Retry-After header if present.
+DEFAULT_RATE_LIMIT_PAD_SECS = 30.0
 # Hard cap on paginated search depth. With c=25 this is 2500 results — well
 # above what any reasonable date window should produce. If we ever blow past
 # it, LOC's date filter is being ignored and we should fail fast rather than
@@ -93,6 +96,7 @@ class LOCClient:
         min_request_interval: float = DEFAULT_MIN_INTERVAL_SECS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
+        rate_limit_pad_secs: float = DEFAULT_RATE_LIMIT_PAD_SECS,
         max_pagination_depth: int = DEFAULT_MAX_PAGINATION_DEPTH,
     ) -> None:
         self._base = base_url.rstrip("/")
@@ -101,6 +105,7 @@ class LOCClient:
         self._min_interval = min_request_interval
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
+        self._rate_limit_pad = rate_limit_pad_secs
         self._max_pagination_depth = max_pagination_depth
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
@@ -419,11 +424,13 @@ class LOCClient:
                     raise last
                 ra = resp.headers.get("retry-after")
                 if ra and ra.isdigit():
-                    # Honor LOC's hint, with a 60s floor so we don't hammer.
+                    # Honor LOC's hint, with a 1s floor.
                     await asyncio.sleep(max(int(ra), 1))
                 else:
-                    # 429 deserves a heavier base than 5xx — pad it.
-                    pad = 5.0 if resp.status_code == 429 else 0.0
+                    # 429 means "really back off" — pad significantly more
+                    # than for 5xx. The cool-off lets LOC's per-minute
+                    # window roll over.
+                    pad = self._rate_limit_pad if resp.status_code == 429 else 0.0
                     await asyncio.sleep(delay + pad)
                     delay *= 2
                 continue
