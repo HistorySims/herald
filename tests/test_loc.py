@@ -28,6 +28,15 @@ def _client() -> LOCClient:
     )
 
 
+def _client_low_cap() -> LOCClient:
+    return LOCClient(
+        user_agent="test/1.0",
+        min_request_interval=0.0,
+        retry_base_delay=0.0,
+        max_pagination_depth=3,
+    )
+
+
 @pytest.mark.asyncio
 async def test_iter_issues_with_pages_groups_by_date_and_edition(httpx_mock):
     httpx_mock.add_response(
@@ -281,3 +290,132 @@ async def test_retries_remote_protocol_error_then_succeeds(httpx_mock):
         ]
     assert len(out) == 2
     assert len(httpx_mock.get_requests()) == 2  # one failure + one success
+
+
+@pytest.mark.asyncio
+async def test_retries_on_429_then_succeeds(httpx_mock):
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    httpx_mock.add_response(url=url_re, status_code=429, text="slow down")
+    httpx_mock.add_response(url=url_re, json=_load("search_two_issues.json"))
+    async with _client() as loc:
+        out = [
+            pair async for pair in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1845, 8, 9), date_to=date(1845, 8, 10),
+            )
+        ]
+    assert len(out) == 2
+    assert len(httpx_mock.get_requests()) == 2
+
+
+@pytest.mark.asyncio
+async def test_client_side_filter_drops_out_of_window_results(httpx_mock):
+    """LOC has been observed ignoring its own date filter — we filter on top.
+
+    Simulate that case: server returns the fixture with dates 1845-08-09 and
+    1845-08-10, but caller asks for 1845-08-10 only. The 1845-08-09 results
+    must be dropped client-side.
+    """
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    httpx_mock.add_response(url=url_re, json=_load("search_two_issues.json"))
+    async with _client() as loc:
+        out = [
+            pair async for pair in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1845, 8, 10), date_to=date(1845, 8, 10),
+            )
+        ]
+    assert len(out) == 1
+    issue, pages = out[0]
+    assert issue.date_issued == date(1845, 8, 10)
+    assert all(p.date_issued == date(1845, 8, 10) for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_pagination_cap_raises_when_filter_ignored(httpx_mock):
+    """When LOC ignores the date filter and never returns in-window results,
+    we must abort after max_pagination_depth pages instead of looping forever.
+    """
+    out_of_window_results = {
+        "results": [
+            {
+                "id": "https://www.loc.gov/resource/sn83030213/1850-01-01/ed-1/seq-1/",
+                "date": "1850-01-01",
+                "number_edition": ["1"],
+                "number_lccn": ["sn83030213"],
+                "partof_title": ["x"],
+                "image_url": ["https://x/seq-1.jpg"],
+            }
+        ],
+        # Indicate there's always a "next" page so the loop would normally
+        # run until the cap trips it.
+        "pagination": {"next": "/sp=N", "current": 1, "total": 999},
+    }
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    # Cap is 3, so the loop hits pages 1, 2, 3 then raises on the next pass.
+    for _ in range(3):
+        httpx_mock.add_response(url=url_re, json=out_of_window_results)
+    async with _client_low_cap() as loc:
+        with pytest.raises(RuntimeError, match="pagination exceeded"):
+            async for _ in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1842, 4, 22), date_to=date(1842, 4, 30),
+            ):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_early_after_window_exit(httpx_mock):
+    """If page N delivered in-window results and page N+1 has none, stop."""
+    in_window = {
+        "results": [
+            {
+                "id": "https://www.loc.gov/resource/sn83030213/1842-04-22/ed-1/seq-1/",
+                "date": "1842-04-22",
+                "number_edition": ["1"],
+                "number_lccn": ["sn83030213"],
+                "partof_title": ["x"],
+                "image_url": ["https://x/seq-1.jpg"],
+            }
+        ],
+        "pagination": {"next": "/sp=2", "current": 1, "total": 100},
+    }
+    out_window = {
+        "results": [
+            {
+                "id": "https://www.loc.gov/resource/sn83030213/1843-01-01/ed-1/seq-1/",
+                "date": "1843-01-01",
+                "number_edition": ["1"],
+                "number_lccn": ["sn83030213"],
+                "partof_title": ["x"],
+                "image_url": ["https://x/seq-1.jpg"],
+            }
+        ],
+        "pagination": {"next": "/sp=3", "current": 2, "total": 100},
+    }
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    httpx_mock.add_response(url=url_re, json=in_window)
+    httpx_mock.add_response(url=url_re, json=out_window)
+    async with _client() as loc:
+        out = [
+            pair async for pair in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1842, 4, 22), date_to=date(1842, 4, 30),
+            )
+        ]
+    assert len(out) == 1
+    assert len(httpx_mock.get_requests()) == 2  # stopped after seeing the gap
+
+
+@pytest.mark.asyncio
+async def test_search_params_include_dates_year_range(httpx_mock):
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    httpx_mock.add_response(url=url_re, json={"results": [], "pagination": {"next": None}})
+    async with _client() as loc:
+        async for _ in loc.iter_issues_with_pages(
+            "sn83030213",
+            date_from=date(1842, 4, 22), date_to=date(1846, 12, 31),
+        ):
+            pass
+    qs = str(httpx_mock.get_requests()[0].url)
+    assert "dates=1842%2F1846" in qs or "dates=1842/1846" in qs
