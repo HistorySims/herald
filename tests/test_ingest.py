@@ -29,18 +29,15 @@ class FakeLOC:
         self._pages = pages
         self._ocr = ocr
 
-    async def iter_issues(
+    async def iter_issues_with_pages(
         self, lccn: str, *, date_from=None, date_to=None
-    ) -> AsyncIterator[IssueRef]:
+    ) -> AsyncIterator[tuple[IssueRef, list[PageRef]]]:
         for i in self._issues:
             if date_from and i.date_issued < date_from:
                 continue
             if date_to and i.date_issued > date_to:
                 continue
-            yield i
-
-    async def list_pages(self, issue: IssueRef) -> list[PageRef]:
-        return list(self._pages.get(issue.url, []))
+            yield i, list(self._pages.get(i.url, []))
 
     async def fetch_ocr(self, page: PageRef) -> str:
         return self._ocr.get(page.ocr_url, "")
@@ -169,7 +166,8 @@ def _page(issue: IssueRef, seq: int) -> PageRef:
         lccn=issue.lccn, date_issued=issue.date_issued, edition=issue.edition,
         sequence=seq,
         image_url=f"{base}.jpg", jp2_url=f"{base}.jp2",
-        pdf_url=f"{base}.pdf", ocr_url=f"{base}/ocr.txt",
+        pdf_url=f"{base}.pdf",
+        resource_url=base, ocr_url=f"{base}/ocr.txt",
     )
 
 

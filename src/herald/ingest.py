@@ -85,7 +85,9 @@ async def ingest_paper(
     buffer: list[_PageWork] = []
     buffer_chunk_count = 0
 
-    async for issue in loc.iter_issues(lccn, date_from=date_from, date_to=date_to):
+    async for issue, pages in loc.iter_issues_with_pages(
+        lccn, date_from=date_from, date_to=date_to,
+    ):
         stats = _bump(stats, issues_seen=1)
         with conn.cursor() as cur, conn.transaction():
             issue_id = db.upsert_issue(
@@ -93,7 +95,6 @@ async def ingest_paper(
                 edition=issue.edition, loc_url=issue.url,
             )
 
-        pages = await loc.list_pages(issue)
         for page_ref in pages:
             stats = _bump(stats, pages_seen=1)
             if _page_already_processed(conn, issue_id=issue_id, sequence=page_ref.sequence):
