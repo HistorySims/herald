@@ -27,7 +27,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 
@@ -159,12 +159,8 @@ class LOCClient:
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> AsyncIterator[IssueRef]:
-        """Yield issues for the LCCN, grouping search pages by (date, edition).
-
-        Kept for backwards compatibility; ``iter_issues_with_pages`` is
-        preferred — it avoids re-searching when the caller wants pages too.
-        """
-        async for issue, _pages in self._iter_issues_with_pages(
+        """Yield issues for the LCCN by walking each date in the window."""
+        async for issue, _pages in self.iter_issues_with_pages(
             lccn, date_from=date_from, date_to=date_to,
         ):
             yield issue
@@ -176,14 +172,24 @@ class LOCClient:
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> AsyncIterator[tuple[IssueRef, list[PageRef]]]:
-        """Yield ``(issue, pages)`` pairs grouped from the page-level search.
+        """Yield ``(issue, pages)`` pairs by walking dates in the window.
 
-        This is the efficient path: one paginated search call enumerates
-        every page in the window, and we group consecutive results by
-        ``(date, edition)`` so the orchestrator can act on each issue
-        atomically.
+        Bypasses LOC's ``dl=page`` collection search, which has been
+        observed silently returning zero in-window pages for valid
+        historic windows (e.g. 1842-04 of sn83030213). Direct date
+        enumeration is more predictable: one HTTP request per
+        (date, edition) probe, 404 → skip, 200 → extract pages.
+
+        Requires both ``date_from`` and ``date_to`` (the search-based
+        version handled None; date-walking can't enumerate an open range
+        cheaply, so callers must specify the window).
         """
-        async for pair in self._iter_issues_with_pages(
+        if date_from is None or date_to is None:
+            raise ValueError(
+                "iter_issues_with_pages requires both date_from and date_to "
+                "for direct date enumeration"
+            )
+        async for pair in self._iter_via_dates(
             lccn, date_from=date_from, date_to=date_to,
         ):
             yield pair
@@ -191,10 +197,8 @@ class LOCClient:
     async def list_pages(self, issue: IssueRef) -> list[PageRef]:
         """Return pages for ``issue`` as previously enumerated.
 
-        With the new API the pages were already fetched alongside the
-        issue, so the orchestrator can call this without a roundtrip.
-        For testability we honour the original signature: when called
-        bare we re-fetch by date window (single-issue scope).
+        With direct date enumeration the pages come back with the issue,
+        so this is a single-day re-probe at the resource endpoint.
         """
         pages_by_issue = await self._pages_for_single_issue(issue)
         return pages_by_issue
@@ -226,105 +230,121 @@ class LOCClient:
 
     # ---- internals ---------------------------------------------------
 
-    async def _iter_issues_with_pages(
-        self,
-        lccn: str,
-        *,
-        date_from: date | None,
-        date_to: date | None,
-    ) -> AsyncIterator[tuple[IssueRef, list[PageRef]]]:
-        """Iterate (issue, pages) pairs by paginating the search endpoint.
-
-        Belt-and-suspenders date filtering:
-        - We pass ``start_date``/``end_date`` and ``dates=YYYY/YYYY`` to LOC,
-          but the API has been observed ignoring both — we've seen a 9-day
-          window return the entire 24-year title.
-        - So we also filter client-side here. The API filter, if honored,
-          reduces transferred bytes; the client filter is the source of truth.
-        - A hard pagination cap (``max_pagination_depth``) aborts with a
-          clear error if we'd otherwise drown in unfiltered results.
-        """
-        page = 1
-        current_key: tuple[date, int] | None = None
-        current_pages: list[PageRef] = []
-        # Trip flag — once we've passed beyond date_to in a sorted stream, we
-        # can stop early. Not relied on (API order isn't guaranteed) but a
-        # cheap optimization.
-        seen_in_window = False
-
-        def _finalize() -> tuple[IssueRef, list[PageRef]] | None:
-            if current_key is None or not current_pages:
-                return None
-            d, ed = current_key
-            issue = IssueRef(
-                lccn=lccn, date_issued=d, edition=ed,
-                url=_issue_resource_url(self._base, lccn, d, ed),
-            )
-            return issue, list(current_pages)
-
-        while True:
-            if page > self._max_pagination_depth:
-                raise RuntimeError(
-                    f"LOC search pagination exceeded {self._max_pagination_depth} "
-                    f"pages for lccn={lccn} window {date_from}..{date_to}. "
-                    "The date filter is likely being ignored server-side; "
-                    "client-side filter found no in-window results either."
-                )
-            params = self._search_params(
-                lccn=lccn, date_from=date_from, date_to=date_to,
-                page=page, per_page=self._per_page,
-            )
-            data = await self._get_json(COLLECTION_PATH, params=params)
-            results = data.get("results", []) or []
-            page_yielded_any_in_window = False
-            for r in results:
-                pref = self._page_ref_from_result(r, lccn=lccn)
-                if pref is None:
-                    continue
-                # Client-side date filter — authoritative.
-                if date_from and pref.date_issued < date_from:
-                    continue
-                if date_to and pref.date_issued > date_to:
-                    continue
-                page_yielded_any_in_window = True
-                seen_in_window = True
-                key = (pref.date_issued, pref.edition)
-                if current_key is None:
-                    current_key = key
-                if key != current_key:
-                    pending = _finalize()
-                    current_key = key
-                    current_pages = [pref]
-                    if pending is not None:
-                        yield pending
-                else:
-                    current_pages.append(pref)
-
-            nxt = (data.get("pagination") or {}).get("next")
-            if not nxt or not results:
-                break
-            # If we've already collected in-window results AND this page had
-            # zero, the stream has moved past our window — stop. This makes
-            # bounded windows finish quickly even when the API ignores the
-            # date filter.
-            if seen_in_window and not page_yielded_any_in_window:
-                break
-            page += 1
-
-        pending = _finalize()
-        if pending is not None:
-            yield pending
-
     async def _pages_for_single_issue(self, issue: IssueRef) -> list[PageRef]:
-        """Re-enumerate pages for one issue via a date-limited search."""
+        """Re-enumerate pages for one issue via the direct date probe."""
         out: list[PageRef] = []
-        async for iss, pages in self._iter_issues_with_pages(
-            issue.lccn, date_from=issue.date_issued, date_to=issue.date_issued,
+        async for iss, pages in self._iter_via_dates(
+            issue.lccn,
+            date_from=issue.date_issued, date_to=issue.date_issued,
         ):
             if iss.edition == issue.edition:
                 out.extend(pages)
         out.sort(key=lambda p: p.sequence)
         return out
+
+    async def _iter_via_dates(
+        self,
+        lccn: str,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> AsyncIterator[tuple[IssueRef, list[PageRef]]]:
+        """Walk each date in the window; probe ed-1..3 at the resource endpoint.
+
+        For each (date, edition) we GET
+        ``/resource/{lccn}/{date}/ed-{ed}/?fo=json``.
+
+        * 404 → no issue at this (date, edition). When ed-1 is missing we
+          assume no issue that day and skip the date; higher editions
+          present without ed-1 are vanishingly rare for 19th-century papers.
+        * 200 → the response carries enough metadata (a ``resources`` list
+          or a ``pagination.total``) to construct ``PageRef`` per sequence.
+          When neither field is present we fall back to assuming a single
+          page (seq-1) because the issue clearly exists.
+        """
+        days = (date_to - date_from).days + 1
+        if days <= 0:
+            return
+        for n in range(days):
+            d = date_from + timedelta(days=n)
+            # Probe ed-1 only. Multi-edition days are rare in 19th-century
+            # papers; speculatively probing ed-2/ed-3 for every date doubles
+            # or triples LOC requests for no win. If we ever need them,
+            # detect via the resource response's metadata instead.
+            pages = await self._probe_issue(lccn, d, 1)
+            if pages is None:
+                continue
+            issue = IssueRef(
+                lccn=lccn, date_issued=d, edition=1,
+                url=_issue_resource_url(self._base, lccn, d, 1),
+            )
+            yield issue, pages
+
+    async def _probe_issue(
+        self, lccn: str, d: date, ed: int,
+    ) -> list[PageRef] | None:
+        """Return PageRefs for (lccn, date, ed), or None on 404."""
+        url = f"{self._base}/resource/{lccn}/{d.isoformat()}/ed-{ed}/?fo=json"
+        try:
+            data = await self._get_json(url)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+        return self._pages_from_issue_data(data, lccn=lccn, d=d, ed=ed)
+
+    def _pages_from_issue_data(
+        self, data: dict, *, lccn: str, d: date, ed: int,
+    ) -> list[PageRef]:
+        """Build PageRefs from an issue-resource JSON response.
+
+        LOC's response shape varies; we try, in order:
+        1. ``resources`` — a list whose entries carry a ``url`` ending in
+           ``/seq-{N}/``. This is the per-page enumeration we want.
+        2. ``pagination.total`` — total page count for the issue; we fab
+           PageRefs for seq 1..total using known URL templates.
+        3. Last resort: a single-page issue (seq-1).
+        """
+        seqs: set[int] = set()
+        for r in _as_list(data.get("resources")):
+            if not isinstance(r, dict):
+                continue
+            for key in ("url", "id"):
+                u = r.get(key) or ""
+                m = re.search(r"/seq-(\d+)/?$", u if isinstance(u, str) else "")
+                if m:
+                    seqs.add(int(m.group(1)))
+                    break
+
+        if not seqs:
+            total = (data.get("pagination") or {}).get("total")
+            n = _to_int(total) or 0
+            if n > 0:
+                seqs.update(range(1, n + 1))
+
+        if not seqs:
+            # Response was 200 but yielded no enumerable pages — treat as
+            # single-page issue. Better to ingest seq-1 than skip the date.
+            seqs = {1}
+
+        return sorted(
+            (self._page_ref_for_seq(lccn, d, ed, seq) for seq in seqs),
+            key=lambda p: p.sequence,
+        )
+
+    def _page_ref_for_seq(
+        self, lccn: str, d: date, ed: int, seq: int,
+    ) -> PageRef:
+        legacy_seq = f"{self._legacy}/lccn/{lccn}/{d.isoformat()}/ed-{ed}/seq-{seq}"
+        return PageRef(
+            lccn=lccn, date_issued=d, edition=ed, sequence=seq,
+            image_url=f"{legacy_seq}.jpg",
+            jp2_url=f"{legacy_seq}.jp2",
+            pdf_url=f"{legacy_seq}.pdf",
+            resource_url=f"{self._base}/resource/{lccn}/{d.isoformat()}/ed-{ed}/seq-{seq}",
+            ocr_url=f"{legacy_seq}/ocr.txt",
+        )
+
 
     def _search_params(
         self,
@@ -353,36 +373,6 @@ class LOCClient:
         if date_from and date_to:
             params.append(("dates", f"{date_from.year}/{date_to.year}"))
         return params
-
-    def _page_ref_from_result(self, r: dict, *, lccn: str) -> PageRef | None:
-        try:
-            d = _parse_date(r.get("date"))
-            ed = _to_int(_first(_as_list(r.get("number_edition")))) or 1
-        except (TypeError, ValueError):
-            return None
-        seq = _sequence_from_result(r)
-        if seq is None:
-            return None
-        page_resource_url = (r.get("id") or "").rstrip("/")
-        image_urls = _as_list(r.get("image_url"))
-        # image_url is sorted from low-res to high-res in our use; pick the
-        # largest JPG for the UI viewer and any .jp2 if present.
-        jpeg = _last(
-            [u for u in image_urls if isinstance(u, str) and u.endswith(".jpg")]
-        )
-        jp2 = _first(
-            [u for u in image_urls if isinstance(u, str) and u.endswith(".jp2")]
-        )
-        pdf = _first(
-            [u for u in image_urls if isinstance(u, str) and u.endswith(".pdf")]
-        )
-        return PageRef(
-            lccn=lccn, date_issued=d, edition=ed, sequence=seq,
-            image_url=jpeg or (image_urls[0] if image_urls else ""),
-            jp2_url=jp2, pdf_url=pdf,
-            resource_url=page_resource_url,
-            ocr_url=_legacy_ocr_url(self._legacy, lccn, d, ed, seq),
-        )
 
     async def _get_json(self, path: str, *, params=None) -> dict:
         resp = await self._get_with_retry(path, params=params)
