@@ -20,8 +20,12 @@ def _load(name: str) -> dict:
 
 
 def _client() -> LOCClient:
-    # Disable the throttle in tests so they stay fast.
-    return LOCClient(user_agent="test/1.0", min_request_interval=0.0)
+    # Disable the throttle and shorten retry delays in tests so they stay fast.
+    return LOCClient(
+        user_agent="test/1.0",
+        min_request_interval=0.0,
+        retry_base_delay=0.0,
+    )
 
 
 @pytest.mark.asyncio
@@ -244,11 +248,36 @@ async def test_pagination_follows_next_marker(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_get_json_raises_on_http_error(httpx_mock):
-    httpx_mock.add_response(
-        url=re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*"),
-        status_code=500,
-    )
+    # 5xx is retried up to max_retries+1 times before bubbling up; configure
+    # enough mock responses to satisfy each attempt.
+    for _ in range(6):
+        httpx_mock.add_response(
+            url=re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*"),
+            status_code=500,
+        )
     async with _client() as loc:
         with pytest.raises(httpx.HTTPStatusError):
             async for _ in loc.iter_issues("sn83030213"):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_retries_remote_protocol_error_then_succeeds(httpx_mock):
+    # Simulate LOC truncating a large response, then succeeding on retry.
+    url_re = re.compile(r"^https://www\.loc\.gov/collections/chronicling-america/.*")
+    httpx_mock.add_exception(
+        httpx.RemoteProtocolError("peer closed early", request=None),
+        url=url_re,
+    )
+    httpx_mock.add_response(
+        url=url_re, json=_load("search_two_issues.json"),
+    )
+    async with _client() as loc:
+        out = [
+            pair async for pair in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1845, 8, 9), date_to=date(1845, 8, 10),
+            )
+        ]
+    assert len(out) == 2
+    assert len(httpx_mock.get_requests()) == 2  # one failure + one success

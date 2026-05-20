@@ -60,9 +60,10 @@ async def _ingest_dry_run(
         console.print(f"[bold]{meta.title}[/bold]  ({meta.lccn})  {meta.place or '-'}")
         issue_count = 0
         page_count = 0
-        async for issue in loc.iter_issues(lccn, date_from=df, date_to=dt):
+        async for issue, pages in loc.iter_issues_with_pages(
+            lccn, date_from=df, date_to=dt,
+        ):
             issue_count += 1
-            pages = await loc.list_pages(issue)
             page_count += len(pages)
             console.print(
                 f"  {issue.date_issued} ed-{issue.edition}  pages={len(pages)}"
