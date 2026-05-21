@@ -16,8 +16,16 @@ class Settings(BaseSettings):
     voyage_api_key: str = Field(default="", description="Voyage AI API key for embeddings/rerank")
 
     loc_user_agent: str = Field(
-        default="herald/0.1 (+https://github.com/HistorySims/herald)",
-        description="User-Agent sent to Chronicling America",
+        default=(
+            "Herald/0.1 "
+            "(mailto:timhartnett29@gmail.com; "
+            "+https://github.com/HistorySims/herald)"
+        ),
+        description=(
+            "User-Agent sent to LOC / Chronicling America. LOC asks "
+            "computational users to identify themselves; the polite form "
+            "is `AppName/version (mailto:contact; +project-url)`."
+        ),
     )
 
 
