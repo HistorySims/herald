@@ -8,7 +8,7 @@ from datetime import date
 import httpx
 import pytest
 
-from herald.loc import LOCClient
+from herald.loc import LOCClient, PageRef
 
 
 def _client() -> LOCClient:
@@ -210,71 +210,75 @@ async def test_429_at_resource_endpoint_retries_then_succeeds(httpx_mock):
     assert len(out) == 1
 
 
-# ---- fetch_ocr still works ------------------------------------------
+# ---- fetch_ocr ------------------------------------------------------
+
+def _page(lccn: str, d: date, seq: int) -> PageRef:
+    legacy = (
+        f"https://chroniclingamerica.loc.gov/lccn/{lccn}/"
+        f"{d.isoformat()}/ed-1/seq-{seq}/ocr.txt"
+    )
+    return PageRef(
+        lccn=lccn, date_issued=d, edition=1, sequence=seq,
+        image_url="i.jpg", jp2_url="i.jp2", pdf_url="i.pdf",
+        resource_url=f"https://www.loc.gov/resource/{lccn}/{d.isoformat()}/ed-1/seq-{seq}",
+        ocr_url=legacy,
+    )
+
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_legacy_text_on_200(httpx_mock):
-    ocr_url = (
-        "https://chroniclingamerica.loc.gov/lccn/sn83030213/"
-        "1845-08-09/ed-1/seq-1/ocr.txt"
+async def test_fetch_ocr_returns_full_text_from_resource_json(httpx_mock):
+    httpx_mock.add_response(
+        url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
+        json={"full_text": "ANTI-RENT EXCITEMENT.\n", "item": {}},
     )
-    httpx_mock.add_response(url=ocr_url, text="ANTI-RENT EXCITEMENT.\n")
     async with _client() as loc:
-        from herald.loc import PageRef
-        page = PageRef(
-            lccn="sn83030213", date_issued=date(1845, 8, 9), edition=1,
-            sequence=1, image_url="i.jpg", jp2_url="i.jp2", pdf_url="i.pdf",
-            resource_url="https://www.loc.gov/resource/sn83030213/1845-08-09/ed-1/seq-1",
-            ocr_url=ocr_url,
-        )
-        text = await loc.fetch_ocr(page)
+        text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
     assert "ANTI-RENT" in text
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_falls_back_to_resource_full_text_on_legacy_404(httpx_mock):
-    ocr_url = (
-        "https://chroniclingamerica.loc.gov/lccn/sn83030213/"
-        "1845-08-09/ed-1/seq-1/ocr.txt"
-    )
-    httpx_mock.add_response(url=ocr_url, status_code=404)
+async def test_fetch_ocr_returns_empty_on_403(httpx_mock):
+    """LOC sometimes serves 403 for redirected ocr.txt URLs. Don't crash."""
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
-        json={"full_text": "fallback ocr text", "item": {}},
+        status_code=403,
     )
     async with _client() as loc:
-        from herald.loc import PageRef
-        page = PageRef(
-            lccn="sn83030213", date_issued=date(1845, 8, 9), edition=1,
-            sequence=1, image_url="i.jpg", jp2_url="i.jp2", pdf_url="i.pdf",
-            resource_url="https://www.loc.gov/resource/sn83030213/1845-08-09/ed-1/seq-1",
-            ocr_url=ocr_url,
-        )
-        text = await loc.fetch_ocr(page)
-    assert text == "fallback ocr text"
+        text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
+    assert text == ""
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_empty_when_both_404(httpx_mock):
-    ocr_url = (
-        "https://chroniclingamerica.loc.gov/lccn/sn99999999/"
-        "1900-01-01/ed-1/seq-1/ocr.txt"
-    )
-    httpx_mock.add_response(url=ocr_url, status_code=404)
+async def test_fetch_ocr_returns_empty_on_404(httpx_mock):
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn99999999/.*"),
         status_code=404,
     )
     async with _client() as loc:
-        from herald.loc import PageRef
-        page = PageRef(
-            lccn="sn99999999", date_issued=date(1900, 1, 1), edition=1,
-            sequence=1, image_url="i.jpg", jp2_url=None, pdf_url=None,
-            resource_url="https://www.loc.gov/resource/sn99999999/1900-01-01/ed-1/seq-1",
-            ocr_url=ocr_url,
-        )
-        text = await loc.fetch_ocr(page)
+        text = await loc.fetch_ocr(_page("sn99999999", date(1900, 1, 1), 1))
     assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_ocr_returns_empty_when_full_text_missing(httpx_mock):
+    httpx_mock.add_response(
+        url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
+        json={"item": {"title": "x"}},
+    )
+    async with _client() as loc:
+        text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
+    assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_ocr_reads_full_text_nested_in_item(httpx_mock):
+    httpx_mock.add_response(
+        url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
+        json={"item": {"full_text": "nested ocr text"}},
+    )
+    async with _client() as loc:
+        text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
+    assert text == "nested ocr text"
 
 
 # ---- iter_issues backward compat shim -------------------------------

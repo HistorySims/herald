@@ -204,29 +204,30 @@ class LOCClient:
         return pages_by_issue
 
     async def fetch_ocr(self, page: PageRef) -> str:
-        """Fetch raw OCR text for a page.
+        """Fetch raw OCR text for a page from the loc.gov resource endpoint.
 
-        Tries the legacy ``chroniclingamerica.loc.gov`` OCR endpoint
-        first (still served and avoids the per-page JSON fetch); on 404
-        falls back to the loc.gov resource endpoint and reads
-        ``full_text``. Returns an empty string when no OCR exists.
+        We used to try the legacy ``chroniclingamerica.loc.gov/.../ocr.txt``
+        URL first as a fast path, but LOC's redirect machinery now
+        translates that path to ``?sp=N&st=text`` on www.loc.gov, which
+        403s. Skipping it entirely. ``full_text`` in the JSON response is
+        the documented OCR-text source.
+
+        Returns an empty string when no OCR is available (404, 403, or
+        response without a ``full_text`` field). The orchestrator handles
+        empty-OCR pages — they get a row but no chunks.
         """
-        # Legacy fast path: plain text, no JSON parsing.
-        resp = await self._get(page.ocr_url)
-        if resp.status_code == 200:
-            return resp.text
-        if resp.status_code != 404:
-            resp.raise_for_status()
-
-        # Modern fallback: resource endpoint with full_text in JSON.
         url = page.resource_url.rstrip("/") + "/?fo=json"
-        resp = await self._get(url)
-        if resp.status_code == 404:
+        try:
+            resp = await self._get_with_retry(url)
+        except httpx.HTTPStatusError:
             return ""
-        resp.raise_for_status()
-        data = resp.json()
-        ft = _extract_full_text(data)
-        return ft or ""
+        if not resp.is_success:
+            return ""
+        try:
+            data = resp.json()
+        except ValueError:
+            return ""
+        return _extract_full_text(data) or ""
 
     # ---- internals ---------------------------------------------------
 
