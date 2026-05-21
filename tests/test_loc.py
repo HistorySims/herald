@@ -182,7 +182,8 @@ async def test_walks_each_date_in_window(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_500_at_resource_endpoint_retries_then_raises(httpx_mock):
-    for _ in range(9):
+    # 5xx is retried up to max_retries+1 times (default max_retries=3).
+    for _ in range(4):
         httpx_mock.add_response(url=_issue_url("1845-08-09"), status_code=500)
     async with _client() as loc:
         with pytest.raises(httpx.HTTPStatusError):
