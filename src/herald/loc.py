@@ -35,20 +35,22 @@ BASE = "https://www.loc.gov"
 LEGACY_BASE = "https://chroniclingamerica.loc.gov"
 COLLECTION_PATH = "/collections/chronicling-america/"
 # LOC's Newspapers endpoint advertises two limits: 20 requests per 10
-# seconds (burst) and 20 requests per 1 minute (sustained). The sustained
-# limit is the binding one — we need an average of ≤ 1 request per 3
-# seconds. We previously ran at 0.6s and tripped 429s after a few minutes.
+# seconds (burst) and 20 requests per 1 minute (sustained). In practice
+# they appear to enforce more aggressively than that for sustained
+# scraping — 3s/req still got us 429-banned after a few minutes.
+# 6s/req puts us at 10 req/min, half the documented sustained ceiling.
 DEFAULT_PER_PAGE = 25
-DEFAULT_MIN_INTERVAL_SECS = 3.0
-DEFAULT_MAX_RETRIES = 8
+DEFAULT_MIN_INTERVAL_SECS = 6.0
+# Retry budget for transient errors. Previous 8/30 combination meant a
+# single 429'd request could burn 5-8 minutes of backoff, and a chain
+# of them ate ~40 min before failing. 3/10 fails fast: a 429-storm
+# costs <= 5 min total for a 9-day window instead of an hour.
+DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BASE_DELAY = 2.0
-# When LOC sends 429, we wait this long on top of any exponential delay,
-# in addition to honoring the Retry-After header if present.
-DEFAULT_RATE_LIMIT_PAD_SECS = 30.0
-# Hard cap on paginated search depth. With c=25 this is 2500 results — well
-# above what any reasonable date window should produce. If we ever blow past
-# it, LOC's date filter is being ignored and we should fail fast rather than
-# hammer the API for an hour.
+DEFAULT_RATE_LIMIT_PAD_SECS = 10.0
+# Hard cap on paginated search depth. Vestigial — kept on the
+# constructor so callers can still pass it for the (now-unused)
+# search path; the active date-walking enumerator doesn't paginate.
 DEFAULT_MAX_PAGINATION_DEPTH = 100
 
 
