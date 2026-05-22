@@ -225,20 +225,66 @@ def _page(lccn: str, d: date, seq: int) -> PageRef:
     )
 
 
+_FULLTEXT_SERVICE_URL = (
+    "https://tile.loc.gov/text-services/word-coordinates-service"
+    "?segment=/service/ndnp/dlc/batch/data/sn83030213/.../0005.xml"
+    "&format=alto_xml&full_text=1"
+)
+
+_ALTO_SAMPLE = """<?xml version="1.0"?>
+<alto xmlns="http://www.loc.gov/standards/alto/ns-v3#">
+  <Layout><Page><PrintSpace><TextBlock>
+    <TextLine>
+      <String CONTENT="ANTI-RENT" HPOS="100" VPOS="200" WIDTH="50" HEIGHT="20"/>
+      <String CONTENT="EXCITEMENT." HPOS="160" VPOS="200" WIDTH="80" HEIGHT="20"/>
+    </TextLine>
+    <TextLine>
+      <String CONTENT="From" HPOS="100" VPOS="230"/>
+      <String CONTENT="our" HPOS="140" VPOS="230"/>
+      <String CONTENT="correspondent." HPOS="170" VPOS="230"/>
+    </TextLine>
+  </TextBlock></PrintSpace></Page></Layout>
+</alto>
+"""
+
+
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_full_text_from_resource_json(httpx_mock):
+async def test_fetch_ocr_follows_fulltext_service_and_parses_alto(httpx_mock):
+    """Real LOC flow: resource JSON gives a fulltext_service URL pointing at
+    ALTO XML; we follow it and extract <String CONTENT="..."> tokens."""
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
-        json={"full_text": "ANTI-RENT EXCITEMENT.\n", "item": {}},
+        json={"fulltext_service": _FULLTEXT_SERVICE_URL, "item": {}},
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://tile\.loc\.gov/text-services/.*"),
+        text=_ALTO_SAMPLE,
     )
     async with _client() as loc:
         text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
     assert "ANTI-RENT" in text
+    assert "EXCITEMENT." in text
+    assert "correspondent." in text
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_empty_on_403(httpx_mock):
-    """LOC sometimes serves 403 for redirected ocr.txt URLs. Don't crash."""
+async def test_fetch_ocr_unescapes_xml_entities_in_alto(httpx_mock):
+    httpx_mock.add_response(
+        url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
+        json={"fulltext_service": _FULLTEXT_SERVICE_URL},
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://tile\.loc\.gov/text-services/.*"),
+        text='<String CONTENT="A&amp;B"/><String CONTENT="&quot;quoted&quot;"/>',
+    )
+    async with _client() as loc:
+        text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
+    assert "A&B" in text
+    assert '"quoted"' in text
+
+
+@pytest.mark.asyncio
+async def test_fetch_ocr_returns_empty_on_403_at_resource(httpx_mock):
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
         status_code=403,
@@ -249,7 +295,7 @@ async def test_fetch_ocr_returns_empty_on_403(httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_empty_on_404(httpx_mock):
+async def test_fetch_ocr_returns_empty_on_404_at_resource(httpx_mock):
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn99999999/.*"),
         status_code=404,
@@ -260,10 +306,12 @@ async def test_fetch_ocr_returns_empty_on_404(httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_returns_empty_when_full_text_missing(httpx_mock):
+async def test_fetch_ocr_returns_empty_when_fulltext_service_missing(httpx_mock):
+    """Some pages have a JSON resource but no fulltext_service link
+    (genuinely no OCR available)."""
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
-        json={"item": {"title": "x"}},
+        json={"item": {"title": "image-only page"}},
     )
     async with _client() as loc:
         text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
@@ -271,14 +319,18 @@ async def test_fetch_ocr_returns_empty_when_full_text_missing(httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_fetch_ocr_reads_full_text_nested_in_item(httpx_mock):
+async def test_fetch_ocr_returns_empty_when_fulltext_service_404s(httpx_mock):
     httpx_mock.add_response(
         url=re.compile(r"^https://www\.loc\.gov/resource/sn83030213/.*"),
-        json={"item": {"full_text": "nested ocr text"}},
+        json={"fulltext_service": _FULLTEXT_SERVICE_URL},
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://tile\.loc\.gov/text-services/.*"),
+        status_code=404,
     )
     async with _client() as loc:
         text = await loc.fetch_ocr(_page("sn83030213", date(1845, 8, 9), 1))
-    assert text == "nested ocr text"
+    assert text == ""
 
 
 # ---- iter_issues backward compat shim -------------------------------

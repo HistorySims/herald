@@ -206,15 +206,20 @@ class LOCClient:
     async def fetch_ocr(self, page: PageRef) -> str:
         """Fetch raw OCR text for a page from the loc.gov resource endpoint.
 
-        We used to try the legacy ``chroniclingamerica.loc.gov/.../ocr.txt``
-        URL first as a fast path, but LOC's redirect machinery now
-        translates that path to ``?sp=N&st=text`` on www.loc.gov, which
-        403s. Skipping it entirely. ``full_text`` in the JSON response is
-        the documented OCR-text source.
+        Flow:
+        1. GET the resource endpoint with ``?fo=json``. The response has a
+           top-level ``fulltext_service`` URL pointing at LOC's text
+           service. (The documented ``full_text`` JSON field doesn't
+           actually appear for newspaper pages — confirmed empirically.)
+        2. GET ``fulltext_service``. Returns ALTO XML by default.
+        3. Parse ``<String CONTENT="word">`` tokens out of the ALTO XML
+           and join. Falls back to returning the response body unchanged
+           if it doesn't look like XML.
 
-        Returns an empty string when no OCR is available (404, 403, or
-        response without a ``full_text`` field). The orchestrator handles
-        empty-OCR pages — they get a row but no chunks.
+        Returns an empty string when OCR is unavailable for any reason
+        (404, 403, missing fulltext_service field, parse failure). The
+        orchestrator handles empty-OCR pages — they get a row but no
+        chunks.
         """
         url = page.resource_url.rstrip("/") + "/?fo=json"
         try:
@@ -227,7 +232,18 @@ class LOCClient:
             data = resp.json()
         except ValueError:
             return ""
-        return _extract_full_text(data) or ""
+
+        ft_service = data.get("fulltext_service") if isinstance(data, dict) else None
+        if not ft_service or not isinstance(ft_service, str):
+            return ""
+
+        try:
+            ft_resp = await self._get_with_retry(ft_service)
+        except httpx.HTTPStatusError:
+            return ""
+        if not ft_resp.is_success:
+            return ""
+        return _parse_alto_text(ft_resp.text)
 
     # ---- internals ---------------------------------------------------
 
@@ -523,13 +539,12 @@ def _issue_resource_url(base: str, lccn: str, d: date, ed: int) -> str:
 
 
 def _extract_full_text(data: dict) -> str | None:
-    """Pull the OCR text out of a resource-endpoint JSON response.
+    """Pull inline OCR text out of a resource JSON response, if present.
 
-    The field has shown up in several shapes across loc.gov endpoints:
-    a top-level ``full_text`` string, an ``item.full_text`` string, or a
-    ``resources[].fulltext_file`` URL we'd need to fetch separately.
-    Returns inline text when present; URL-only cases yield ``None`` so
-    the caller can decide whether to chase the link.
+    Kept around for completeness. The newspaper resource pages we hit
+    don't actually have inline ``full_text`` — they have a
+    ``fulltext_service`` URL pointing at ALTO XML — but other loc.gov
+    collections do, so this stays as a defensive shortcut.
     """
     if not isinstance(data, dict):
         return None
@@ -542,3 +557,43 @@ def _extract_full_text(data: dict) -> str | None:
         if isinstance(ft, str) and ft.strip():
             return ft
     return None
+
+
+# Catches ``<String ... CONTENT="word" .../>`` regardless of attribute
+# ordering. ALTO XML uses these for every recognized token on the page.
+_ALTO_STRING_RE = re.compile(
+    r'<String\b[^>]*\bCONTENT="([^"]*)"',
+    re.IGNORECASE,
+)
+
+
+def _parse_alto_text(body: str) -> str:
+    """Extract plain text from an ALTO XML document.
+
+    ALTO encodes each recognized word as ``<String CONTENT="..."/>``
+    inside nested ``<TextLine>`` / ``<TextBlock>`` elements. We grab the
+    CONTENT attributes in document order and join with spaces — that's
+    enough for a chunker; layout structure is irrelevant downstream.
+
+    Defensive: returns the body unchanged when it doesn't look like
+    ALTO XML, so a server that occasionally returns plain text still
+    works.
+    """
+    if not body:
+        return ""
+    matches = _ALTO_STRING_RE.findall(body)
+    if not matches:
+        # Doesn't look like ALTO — maybe plain text already.
+        return body
+    # Crude unescape of the four XML entities that show up in OCR
+    # CONTENT attributes. Stays well under stdlib's xml machinery cost.
+    out_parts: list[str] = []
+    for token in matches:
+        token = (token
+                 .replace("&amp;", "&")
+                 .replace("&lt;", "<")
+                 .replace("&gt;", ">")
+                 .replace("&quot;", '"')
+                 .replace("&apos;", "'"))
+        out_parts.append(token)
+    return " ".join(out_parts)
