@@ -1,0 +1,82 @@
+name: answer
+
+# Manually triggered. Runs `herald answer "<question>"` — retrieval +
+# Claude-Sonnet-4-6 synthesis with cite-or-refuse — and prints the
+# answer plus citation list to the Actions log.
+#
+# Required secrets:
+#   SUPABASE_DB_URL    - Supabase Session-mode pooler connection string
+#   VOYAGE_API_KEY     - Voyage AI key (query embedding + rerank-2.5)
+#   ANTHROPIC_API_KEY  - Anthropic API key (Claude synthesis)
+#
+# Cost: ~$0.04 per call (12 chunks × ~600 tokens input + ~1000 token
+# output @ Sonnet 4.6 pricing). Trivial for the validation set.
+
+on:
+  workflow_dispatch:
+    inputs:
+      question:
+        description: "Natural-language question"
+        required: true
+        type: string
+      date_from:
+        description: "Earliest issue date YYYY-MM-DD (optional)"
+        required: false
+        type: string
+      date_to:
+        description: "Latest issue date YYYY-MM-DD (optional)"
+        required: false
+        type: string
+      top:
+        description: "Chunks to send to Claude"
+        required: false
+        type: string
+        default: "12"
+      no_rerank:
+        description: "Skip Voyage rerank-2.5"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: answer-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      HERALD_QUESTION: ${{ inputs.question }}
+      HERALD_DATE_FROM: ${{ inputs.date_from }}
+      HERALD_DATE_TO: ${{ inputs.date_to }}
+      HERALD_TOP: ${{ inputs.top }}
+      HERALD_NO_RERANK: ${{ inputs.no_rerank }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Sanity-check required secrets are present
+        run: |
+          [ -n "$SUPABASE_DB_URL" ]   || { echo "SUPABASE_DB_URL secret missing"; exit 1; }
+          [ -n "$VOYAGE_API_KEY" ]    || { echo "VOYAGE_API_KEY secret missing"; exit 1; }
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "ANTHROPIC_API_KEY secret missing"; exit 1; }
+          echo "secrets present (lengths only):"
+          echo "  db=${#SUPABASE_DB_URL} voyage=${#VOYAGE_API_KEY} anthropic=${#ANTHROPIC_API_KEY}"
+      - name: Answer
+        run: |
+          args=("answer" "$HERALD_QUESTION")
+          [ -n "$HERALD_DATE_FROM" ] && args+=("--from" "$HERALD_DATE_FROM")
+          [ -n "$HERALD_DATE_TO" ]   && args+=("--to"   "$HERALD_DATE_TO")
+          [ -n "$HERALD_TOP" ]       && args+=("--top"  "$HERALD_TOP")
+          [ "$HERALD_NO_RERANK" = "true" ] && args+=("--no-rerank")
+          echo "Running: herald ${args[*]}"
+          uv run herald "${args[@]}"

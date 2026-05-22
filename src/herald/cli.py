@@ -20,6 +20,7 @@ from herald.ingest import ingest_paper
 from herald.loc import LOCClient, PageRef
 from herald.rerank import VoyageReranker
 from herald.retrieval import HybridRetriever
+from herald.synth import Synthesizer
 
 app = typer.Typer(
     add_completion=False,
@@ -214,6 +215,85 @@ async def _ask(
         )
         console.print(f"    {snippet}")
         console.print(f"    [dim]{h.image_url}[/dim]\n")
+
+
+@app.command()
+def answer(
+    question: str = typer.Argument(..., help="Natural-language question"),
+    date_from: str | None = typer.Option(None, "--from", help="Earliest issue date (YYYY-MM-DD)"),
+    date_to: str | None = typer.Option(None, "--to", help="Latest issue date (YYYY-MM-DD)"),
+    final_top: int = typer.Option(12, "--top", help="Chunks to send to Claude"),
+    no_rerank: bool = typer.Option(False, "--no-rerank", help="Skip Voyage rerank"),
+) -> None:
+    """Retrieve passages and synthesize a cited answer via Claude Sonnet 4.6."""
+    cfg = settings.load()
+    df = _parse_date(date_from) if date_from else None
+    dt = _parse_date(date_to) if date_to else None
+    asyncio.run(_answer(cfg, question, df, dt, final_top, no_rerank))
+
+
+async def _answer(
+    cfg: settings.Settings,
+    question: str,
+    df: date | None,
+    dt: date | None,
+    final_top: int,
+    no_rerank: bool,
+) -> None:
+    if not cfg.supabase_db_url:
+        raise typer.BadParameter("SUPABASE_DB_URL is not set.")
+    if not cfg.voyage_api_key:
+        raise typer.BadParameter("VOYAGE_API_KEY is not set.")
+    if not cfg.anthropic_api_key:
+        raise typer.BadParameter(
+            "ANTHROPIC_API_KEY is not set. Get one at console.anthropic.com."
+        )
+
+    conn = db.connect(cfg.supabase_db_url)
+    try:
+        async with (
+            VoyageEmbedder(api_key=cfg.voyage_api_key) as embedder,
+            VoyageReranker(api_key=cfg.voyage_api_key) as reranker,
+        ):
+            retriever = HybridRetriever(
+                conn=conn,
+                embedder=embedder,
+                reranker=None if no_rerank else reranker,
+            )
+            hits = await retriever.retrieve(
+                question,
+                date_from=df,
+                date_to=dt,
+                final_top=final_top,
+                rerank=not no_rerank,
+            )
+        synth = Synthesizer(api_key=cfg.anthropic_api_key)
+        result = await synth.answer(question, hits)
+    finally:
+        conn.close()
+
+    console.print(f"\n[bold]Q:[/bold] {question}\n")
+    console.print(result.text)
+    console.print()
+    if result.cited_indices:
+        console.print(f"[bold]Sources cited[/bold] ({len(set(result.cited_indices))} unique):")
+        seen: set[int] = set()
+        for n in result.cited_indices:
+            if n in seen:
+                continue
+            seen.add(n)
+            h = hits[n - 1]
+            console.print(
+                f"  [bold cyan][{n}][/bold cyan]  {h.paper_title}, "
+                f"{h.date_issued}, p.{h.page_sequence}"
+            )
+            console.print(f"        [dim]{h.image_url}[/dim]")
+    else:
+        console.print("[yellow]No inline citations in answer.[/yellow]")
+    console.print(
+        f"\n[dim]tokens: in={result.input_tokens} out={result.output_tokens}  "
+        f"refusal={result.refused}[/dim]"
+    )
 
 
 @app.command()
