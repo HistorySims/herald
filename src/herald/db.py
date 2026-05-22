@@ -197,3 +197,174 @@ def iter_paper_lccns(cur: psycopg.Cursor) -> Iterable[str]:
     cur.execute("select lccn from papers order by lccn")
     for (lccn,) in cur.fetchall():
         yield lccn
+
+
+# ---- retrieval -------------------------------------------------------
+
+@dataclass(frozen=True)
+class ChunkHit:
+    """A retrieval hit with full citation metadata.
+
+    Populated by ``fetch_chunk_details`` after retrieval has narrowed
+    down to the chunks worth showing. ``score`` is filled by the
+    retrieval orchestrator (RRF, then rerank), not by SQL.
+    """
+
+    chunk_id: UUID
+    content: str
+    paper_lccn: str
+    paper_title: str
+    date_issued: date
+    edition: int
+    page_sequence: int
+    image_url: str
+    resource_url: str
+    score: float = 0.0
+
+
+# Common filter clause for retrieval queries. Joins to issues so callers
+# can scope by paper or date window without each call having to repeat
+# the boilerplate. Parameters are positional in the order the callers
+# build them.
+_FILTER_CLAUSE = """
+  and (%(paper_id)s::uuid is null or i.paper_id = %(paper_id)s::uuid)
+  and (%(date_from)s::date is null or i.date_issued >= %(date_from)s::date)
+  and (%(date_to)s::date   is null or i.date_issued <= %(date_to)s::date)
+"""
+
+
+def semantic_search(
+    cur: psycopg.Cursor,
+    *,
+    query_embedding: list[float],
+    k: int,
+    paper_id: UUID | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[tuple[UUID, float]]:
+    """Top-k chunks by cosine distance to ``query_embedding``.
+
+    Uses the HNSW partial index on ``chunks(embedding)`` where
+    ``is_current = true``. Returns ``(chunk_id, distance)`` pairs in
+    ascending distance order — smaller is more similar.
+    """
+    cur.execute(
+        f"""
+        select c.id, c.embedding <=> %(qvec)s::vector as distance
+        from chunks c
+        join pages  p on p.id = c.page_id
+        join issues i on i.id = p.issue_id
+        where c.is_current = true
+        {_FILTER_CLAUSE}
+        order by c.embedding <=> %(qvec)s::vector
+        limit %(k)s
+        """,
+        {
+            "qvec": query_embedding,
+            "k": k,
+            "paper_id": paper_id,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
+    return [(_coerce_uuid(row[0]), float(row[1])) for row in cur.fetchall()]
+
+
+def fts_search(
+    cur: psycopg.Cursor,
+    *,
+    query: str,
+    k: int,
+    paper_id: UUID | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[tuple[UUID, float]]:
+    """Top-k chunks by full-text relevance to ``query``.
+
+    Uses ``websearch_to_tsquery`` (handles user-style queries with
+    quoted phrases, OR, etc. without raising on syntax) and
+    ``ts_rank_cd`` for ranking. Returns ``(chunk_id, rank)`` in
+    descending rank order. Empty list when the tsquery is empty or
+    no chunks match.
+    """
+    cur.execute(
+        f"""
+        select c.id, ts_rank_cd(c.fts, q) as rank
+        from chunks c
+        join pages  p on p.id = c.page_id
+        join issues i on i.id = p.issue_id,
+             websearch_to_tsquery('english', %(q)s) q
+        where c.is_current = true
+          and c.fts @@ q
+        {_FILTER_CLAUSE}
+        order by ts_rank_cd(c.fts, q) desc
+        limit %(k)s
+        """,
+        {
+            "q": query,
+            "k": k,
+            "paper_id": paper_id,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
+    return [(_coerce_uuid(row[0]), float(row[1])) for row in cur.fetchall()]
+
+
+def fetch_chunk_details(
+    cur: psycopg.Cursor,
+    *,
+    chunk_ids: Sequence[UUID],
+) -> dict[UUID, ChunkHit]:
+    """Fetch citation metadata for a set of chunk ids.
+
+    Returns a ``dict`` keyed by chunk_id so the caller can preserve
+    its own ordering (e.g. the RRF + rerank order) when assembling the
+    final list. Missing chunks are silently absent from the result.
+    """
+    if not chunk_ids:
+        return {}
+    cur.execute(
+        """
+        select
+            c.id,
+            c.content,
+            pap.lccn,
+            pap.title,
+            i.date_issued,
+            i.edition,
+            p.sequence,
+            p.image_url,
+            c.page_id
+        from chunks c
+        join pages  p   on p.id = c.page_id
+        join issues i   on i.id = p.issue_id
+        join papers pap on pap.id = i.paper_id
+        where c.id = any(%(ids)s::uuid[])
+          and c.is_current = true
+        """,
+        {"ids": [str(cid) for cid in chunk_ids]},
+    )
+    out: dict[UUID, ChunkHit] = {}
+    for row in cur.fetchall():
+        chunk_id = _coerce_uuid(row[0])
+        out[chunk_id] = ChunkHit(
+            chunk_id=chunk_id,
+            content=row[1],
+            paper_lccn=row[2],
+            paper_title=row[3],
+            date_issued=row[4],
+            edition=int(row[5]),
+            page_sequence=int(row[6]),
+            image_url=row[7],
+            # Reconstruct resource_url from canonical pieces — we don't
+            # store it on pages, but it's deterministic from LCCN+date+ed+seq.
+            resource_url=_resource_url(row[2], row[4], int(row[5]), int(row[6])),
+        )
+    return out
+
+
+def _resource_url(lccn: str, d: date, ed: int, seq: int) -> str:
+    return (
+        f"https://www.loc.gov/resource/{lccn}/{d.isoformat()}/ed-{ed}/seq-{seq}"
+    )
