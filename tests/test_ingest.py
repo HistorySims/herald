@@ -130,7 +130,7 @@ class FakeConn:
             return (self._mint_uuid(),)
         if "insert into issues" in sql:
             return (self._mint_uuid(),)
-        if "select ocr_text is not null from pages" in sql:
+        if "select exists" in sql and "from chunks c" in sql:
             issue_id, seq = params
             return (self.existing_page_text.get((issue_id, seq), False),)
         if "insert into pages" in sql:
@@ -217,7 +217,7 @@ async def test_resume_skips_already_processed_pages():
     orig_respond = conn.respond
 
     def patched(sql, params):
-        if "select ocr_text is not null from pages" in sql:
+        if "select exists" in sql and "from chunks c" in sql:
             _issue_id, seq = params
             return (seq == 1,)
         return orig_respond(sql, params)

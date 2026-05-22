@@ -128,10 +128,30 @@ async def ingest_paper(
 def _page_already_processed(
     conn: psycopg.Connection, *, issue_id: UUID, sequence: int
 ) -> bool:
-    """A page is "processed" iff a row exists with non-null ocr_text."""
+    """A page is "processed" iff at least one current chunk row exists.
+
+    Previously the check was ``pages.ocr_text IS NOT NULL``, but an
+    empty-OCR write (e.g. when fetch_ocr returned "") still leaves
+    ``ocr_text = ''`` which trips that predicate. The chunk-based check
+    is the right one: if we never got chunks, we never finished the
+    page's real work and should re-attempt it.
+
+    Pages that legitimately have no OCR (image-only) will be re-probed
+    on every ingest run. Cheap (2 HTTP requests per retry) and rare for
+    the corpora we care about.
+    """
     with conn.cursor() as cur, conn.transaction():
         cur.execute(
-            "select ocr_text is not null from pages where issue_id = %s and sequence = %s",
+            """
+            select exists (
+                select 1
+                from chunks c
+                join pages  p on p.id = c.page_id
+                where p.issue_id = %s
+                  and p.sequence = %s
+                  and c.is_current = true
+            )
+            """,
             (issue_id, sequence),
         )
         row = cur.fetchone()
