@@ -16,6 +16,11 @@ from rich.console import Console
 
 from herald import db, normalize, settings
 from herald.embed import VoyageEmbedder
+from herald.eval import (
+    EVAL_QUESTIONS,
+    format_results_markdown,
+    run_eval,
+)
 from herald.ingest import ingest_paper
 from herald.loc import LOCClient, PageRef
 from herald.rerank import VoyageReranker
@@ -294,6 +299,104 @@ async def _answer(
         f"\n[dim]tokens: in={result.input_tokens} out={result.output_tokens}  "
         f"refusal={result.refused}[/dim]"
     )
+
+
+@app.command(name="eval")
+def eval_cmd(
+    question: int | None = typer.Option(
+        None, "--question", "-q",
+        help="Run only question N (1..10). Default: all 10.",
+    ),
+    output: str | None = typer.Option(
+        None, "--output", "-o",
+        help="Write Markdown report to this path. Default: print to stdout.",
+    ),
+    date_from: str | None = typer.Option(None, "--from", help="Earliest issue date"),
+    date_to: str | None = typer.Option(None, "--to", help="Latest issue date"),
+    final_top: int = typer.Option(12, "--top", help="Chunks per question"),
+    no_rerank: bool = typer.Option(False, "--no-rerank", help="Skip Voyage rerank"),
+) -> None:
+    """Run the 10 Phase 1 validation questions (PLAN §12).
+
+    The output is a Markdown report sized for hand-grading: each
+    question gets its answer, the citation list with image URLs, and
+    token-usage stats.
+    """
+    cfg = settings.load()
+    df = _parse_date(date_from) if date_from else None
+    dt = _parse_date(date_to) if date_to else None
+
+    if question is not None:
+        matching = [q for q in EVAL_QUESTIONS if q.number == question]
+        if not matching:
+            raise typer.BadParameter(
+                f"Question {question} not in 1..{len(EVAL_QUESTIONS)}"
+            )
+        chosen = matching
+    else:
+        chosen = list(EVAL_QUESTIONS)
+
+    asyncio.run(_eval(cfg, chosen, df, dt, final_top, no_rerank, output))
+
+
+async def _eval(
+    cfg: settings.Settings,
+    chosen: list,
+    df: date | None,
+    dt: date | None,
+    final_top: int,
+    no_rerank: bool,
+    output: str | None,
+) -> None:
+    if not cfg.supabase_db_url:
+        raise typer.BadParameter("SUPABASE_DB_URL is not set.")
+    if not cfg.voyage_api_key:
+        raise typer.BadParameter("VOYAGE_API_KEY is not set.")
+    if not cfg.anthropic_api_key:
+        raise typer.BadParameter(
+            "ANTHROPIC_API_KEY is not set. Get one at console.anthropic.com."
+        )
+
+    conn = db.connect(cfg.supabase_db_url)
+    try:
+        async with (
+            VoyageEmbedder(api_key=cfg.voyage_api_key) as embedder,
+            VoyageReranker(api_key=cfg.voyage_api_key) as reranker,
+        ):
+            retriever = HybridRetriever(
+                conn=conn,
+                embedder=embedder,
+                reranker=None if no_rerank else reranker,
+            )
+            synth = Synthesizer(api_key=cfg.anthropic_api_key)
+            results = await run_eval(
+                retriever=retriever,
+                synthesizer=synth,
+                questions=chosen,
+                date_from=df,
+                date_to=dt,
+                final_top=final_top,
+                rerank=not no_rerank,
+                on_progress=lambda msg: console.print(f"  [dim]{msg}[/dim]"),
+            )
+    finally:
+        conn.close()
+
+    md = format_results_markdown(
+        results, date_from=df, date_to=dt,
+    )
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(md)
+        console.print(f"\n[bold green]wrote eval report[/bold green]  {output}")
+        console.print(f"  questions={len(results)}  "
+                      f"total_in={sum(r.answer.input_tokens for r in results)}  "
+                      f"total_out={sum(r.answer.output_tokens for r in results)}")
+    else:
+        # Print straight to stdout — markdown is plenty readable.
+        # Don't pipe through rich.console (it'll mangle markdown formatting
+        # heuristically); use plain print so the user can pipe / redirect.
+        print(md)
 
 
 @app.command()
