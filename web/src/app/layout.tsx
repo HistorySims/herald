@@ -3,17 +3,17 @@ import { Lora, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const lora = Lora({
-  variable: "--font-serif",
+  variable: "--font-lora",
   subsets: ["latin"],
 });
 
 const inter = Inter({
-  variable: "--font-sans",
+  variable: "--font-inter",
   subsets: ["latin"],
 });
 
 const jetbrains = JetBrains_Mono({
-  variable: "--font-mono",
+  variable: "--font-jetbrains",
   subsets: ["latin"],
 });
 
@@ -32,6 +32,7 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${lora.variable} ${inter.variable} ${jetbrains.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <body className="h-full font-sans bg-[#faf7f0] text-[#2c1810]">
         {children}

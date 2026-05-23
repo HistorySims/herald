@@ -10,7 +10,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-inter);
   --font-serif: var(--font-lora);
-  --font-mono: var(--font-jetbrains-mono);
+  --font-mono: var(--font-jetbrains);
 }
 
 body {
