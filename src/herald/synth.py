@@ -22,7 +22,7 @@ from anthropic import AsyncAnthropic
 from herald.retrieval import RetrievedChunk
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-DEFAULT_MAX_TOKENS = 1500
+DEFAULT_MAX_TOKENS = 2500
 DEFAULT_TEMPERATURE = 0.2
 
 _CITE_RE = re.compile(r"\[(\d+)\]")
@@ -213,9 +213,14 @@ def _extract_citation_indices(text: str) -> list[int]:
 
 
 def _looks_like_refusal(text: str) -> bool:
-    """Heuristic: did Claude emit the PLAN §9 refusal phrasing?
+    """Heuristic: did Claude emit the PLAN §9 refusal phrasing with no citations?
 
     Used for analytics / UI hinting only; doesn't gate any behavior.
+    Requires BOTH the canonical phrase AND zero citation markers — a
+    response that contains the phrase but still cites sources is
+    substantive, not a refusal.
     """
     needle = "does not have enough to support a confident answer"
-    return needle.lower() in text.lower()
+    has_phrase = needle.lower() in text.lower()
+    has_citations = bool(_CITE_RE.search(text))
+    return has_phrase and not has_citations

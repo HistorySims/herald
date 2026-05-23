@@ -447,10 +447,6 @@ class LOCClient:
         # Loop always returns or raises; unreachable.
         raise last or RuntimeError("loc retry loop terminated unexpectedly")
 
-    async def _get(self, url: str) -> httpx.Response:
-        await self._throttle()
-        return await self._client.get(url)
-
     async def _throttle(self) -> None:
         if self._min_interval <= 0:
             return
@@ -501,30 +497,6 @@ def _first(xs):
     return xs[0] if xs else None
 
 
-def _last(xs):
-    return xs[-1] if xs else None
-
-
-def _sequence_from_result(r: dict) -> int | None:
-    """Pull the page sequence number from a loc.gov search result."""
-    # Direct fields
-    for key in ("number_page_seq", "number_sequence_seq", "page", "sequence"):
-        v = _to_int(_first(_as_list(r.get(key))))
-        if v is not None:
-            return v
-    # Otherwise infer from the resource id URL: .../seq-N/ or .../seq-N
-    rid = r.get("id") or ""
-    m = re.search(r"/seq-(\d+)/?$", rid)
-    if m:
-        return int(m.group(1))
-    # Some results carry it under a "url" field similarly.
-    url = _first(_as_list(r.get("url"))) or ""
-    m = re.search(r"/seq-(\d+)/?$", url)
-    if m:
-        return int(m.group(1))
-    return None
-
-
 def _format_place(r: dict) -> str | None:
     city = _first(_as_list(r.get("location_city")))
     state = _first(_as_list(r.get("location_state")))
@@ -532,33 +504,8 @@ def _format_place(r: dict) -> str | None:
     return ", ".join(parts) if parts else None
 
 
-def _legacy_ocr_url(base: str, lccn: str, d: date, ed: int, seq: int) -> str:
-    return f"{base}/lccn/{lccn}/{d.isoformat()}/ed-{ed}/seq-{seq}/ocr.txt"
-
-
 def _issue_resource_url(base: str, lccn: str, d: date, ed: int) -> str:
     return f"{base}/resource/{lccn}/{d.isoformat()}/ed-{ed}/"
-
-
-def _extract_full_text(data: dict) -> str | None:
-    """Pull inline OCR text out of a resource JSON response, if present.
-
-    Kept around for completeness. The newspaper resource pages we hit
-    don't actually have inline ``full_text`` — they have a
-    ``fulltext_service`` URL pointing at ALTO XML — but other loc.gov
-    collections do, so this stays as a defensive shortcut.
-    """
-    if not isinstance(data, dict):
-        return None
-    ft = data.get("full_text")
-    if isinstance(ft, str) and ft.strip():
-        return ft
-    item = data.get("item")
-    if isinstance(item, dict):
-        ft = item.get("full_text")
-        if isinstance(ft, str) and ft.strip():
-            return ft
-    return None
 
 
 # Catches ``<String ... CONTENT="word" .../>`` regardless of attribute

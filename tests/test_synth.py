@@ -181,14 +181,14 @@ async def test_answer_raises_when_hallucination_persists_after_retry():
 
 
 @pytest.mark.asyncio
-async def test_answer_marks_refused_when_canonical_phrase_present():
+async def test_answer_not_refused_when_canonical_phrase_present_with_citations():
     fake = FakeAnthropic([
         "The corpus does not have enough to support a confident answer — "
         "here is what little it does say: not much [1]."
     ])
     s = Synthesizer(api_key="k", client=fake)  # type: ignore[arg-type]
     out = await s.answer("q", [_chunk(CHUNK_A, "x")])
-    assert out.refused is True
+    assert out.refused is False
     assert out.cited_indices == [1]
 
 
