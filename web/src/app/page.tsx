@@ -35,11 +35,13 @@ export default function Home() {
 
   return (
     <div className="h-full flex flex-col md:flex-row">
-      {/* Chat pane */}
+      {/* Chat pane — full height when viewer closed, half on mobile when open */}
       <div
         className={`${
-          showViewer ? "h-1/2 md:h-full md:w-1/2 lg:w-[45%]" : "h-full w-full"
-        } flex-shrink-0 border-r border-stone-200 transition-all`}
+          showViewer
+            ? "hidden md:flex md:h-full md:w-1/2 lg:w-[45%]"
+            : "h-full w-full"
+        } flex-shrink-0 border-r border-stone-200 flex flex-col`}
       >
         <ChatPane
           onCitationClick={handleCitationClick}
@@ -49,23 +51,37 @@ export default function Home() {
 
       {/* Viewer pane */}
       {showViewer && (
-        <div className="flex-1 flex flex-col bg-[#1a1a1a] min-h-0">
+        <div className="flex-1 flex flex-col bg-[#1a1a1a] min-h-0 h-full">
+          {/* Viewer header */}
           {viewerMeta && (
-            <div className="px-3 py-2 bg-stone-900 border-b border-stone-700 flex items-center justify-between">
-              <div className="text-xs text-stone-400 font-mono truncate">
-                {viewerMeta.paper} &middot; {viewerMeta.date} &middot; p.
-                {viewerMeta.page}
+            <div className="px-3 py-2 bg-stone-900 border-b border-stone-700 flex items-center justify-between flex-shrink-0">
+              <div className="text-xs text-stone-400 font-mono truncate mr-2">
+                {viewerMeta.paper} &middot; {viewerMeta.date} &middot; p.{viewerMeta.page}
               </div>
-              <button
-                onClick={() => {
-                  setShowViewer(false);
-                  setActiveCitationIndex(null);
-                }}
-                className="text-stone-500 hover:text-stone-300 text-sm ml-2"
-                title="Close viewer"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {/* Mobile: back to chat */}
+                <button
+                  onClick={() => {
+                    setShowViewer(false);
+                    setActiveCitationIndex(null);
+                  }}
+                  className="md:hidden text-stone-400 hover:text-stone-200 text-xs
+                    border border-stone-600 rounded px-2 py-1"
+                >
+                  Back to chat
+                </button>
+                {/* Desktop: close viewer */}
+                <button
+                  onClick={() => {
+                    setShowViewer(false);
+                    setActiveCitationIndex(null);
+                  }}
+                  className="hidden md:block text-stone-500 hover:text-stone-300 text-sm"
+                  title="Close viewer"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           )}
           <div className="flex-1 min-h-0">

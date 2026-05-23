@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import type { Message, Citation, AskResponse } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
+import { FilterControls } from "./FilterControls";
 
 interface ChatPaneProps {
   onCitationClick: (citation: Citation) => void;
@@ -13,6 +14,12 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "searching" | "streaming">("idle");
+  const [filters, setFilters] = useState<{
+    paperLccn: string | null;
+    dateFrom: string | null;
+    dateTo: string | null;
+  }>({ paperLccn: null, dateFrom: null, dateTo: null });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -20,12 +27,13 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSubmit = async () => {
-    const question = input.trim();
+  const handleSubmit = useCallback(async (overrideQuestion?: string) => {
+    const question = (overrideQuestion ?? input).trim();
     if (!question || loading) return;
 
     setInput("");
     setLoading(true);
+    setPhase("searching");
 
     const userMsg: Message = { role: "user", content: question };
     const assistantMsg: Message = {
@@ -39,7 +47,12 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       const resp = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          paper_lccn: filters.paperLccn,
+          date_from: filters.dateFrom,
+          date_to: filters.dateTo,
+        }),
       });
 
       if (!resp.ok) {
@@ -71,6 +84,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
             try {
               const parsed = JSON.parse(data);
               if (eventType === "token") {
+                if (phase !== "streaming") setPhase("streaming");
                 streamedText += parsed.text;
                 setMessages((prev) => {
                   const updated = [...prev];
@@ -118,8 +132,9 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       });
     } finally {
       setLoading(false);
+      setPhase("idle");
     }
-  };
+  }, [input, loading, filters, phase]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -136,7 +151,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
           Herald
         </h1>
         <p className="text-xs text-stone-500">
-          Semantic research over historic New York newspapers, 1842-1846
+          Semantic research over historic New York newspapers, 1842&ndash;1846
         </p>
       </div>
 
@@ -160,13 +175,12 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
                 ].map((q) => (
                   <button
                     key={q}
-                    onClick={() => {
-                      setInput(q);
-                      textareaRef.current?.focus();
-                    }}
+                    onClick={() => handleSubmit(q)}
+                    disabled={loading}
                     className="block w-full text-left text-sm px-3 py-2 rounded-lg
                       border border-stone-200 text-stone-600 hover:bg-stone-50
-                      hover:border-stone-300 transition-colors"
+                      hover:border-stone-300 transition-colors
+                      disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {q}
                   </button>
@@ -183,11 +197,25 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
             onCitationClick={onCitationClick}
           />
         ))}
+        {phase === "searching" && messages.length > 0 && messages[messages.length - 1].content === "" && (
+          <div className="flex justify-start mb-4">
+            <div className="bg-stone-100 border border-stone-200 rounded-xl px-4 py-3">
+              <div className="flex items-center gap-2 text-sm text-stone-500">
+                <span className="inline-block w-4 h-4 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
+                Searching the corpus...
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
       {/* Input */}
-      <div className="px-4 py-3 border-t border-stone-200 bg-stone-50">
+      <div className="px-4 py-3 border-t border-stone-200 bg-stone-50 space-y-2">
+        <FilterControls
+          onFiltersChange={setFilters}
+          disabled={loading}
+        />
         <div className="flex gap-2">
           <textarea
             ref={textareaRef}
@@ -203,7 +231,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
               disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <button
-            onClick={handleSubmit}
+            onClick={() => handleSubmit()}
             disabled={loading || !input.trim()}
             className="px-4 py-2 rounded-lg bg-amber-800 text-amber-50 text-sm font-medium
               hover:bg-amber-700 transition-colors
@@ -212,8 +240,8 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
             {loading ? "..." : "Ask"}
           </button>
         </div>
-        <p className="text-xs text-stone-400 mt-1">
-          Enter to send, Shift+Enter for newline
+        <p className="text-xs text-stone-400">
+          Enter to send &middot; Shift+Enter for newline
         </p>
       </div>
     </div>
