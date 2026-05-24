@@ -5,7 +5,7 @@ import type { Message, Citation, AskResponse } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
 import { FilterControls } from "./FilterControls";
 
-const STORAGE_KEY = "herald-messages";
+const STORAGE_KEY = "herald-messages-v2";
 
 function loadMessages(): Message[] {
   if (typeof window === "undefined") return [];
@@ -42,30 +42,15 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
     dateTo: string | null;
   }>({ paperLccn: null, dateFrom: null, dateTo: null });
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const shouldAutoScrollRef = useRef(true);
-
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, []);
+  const justSubmittedRef = useRef(false);
 
   useEffect(() => {
-    if (phase !== "streaming" && shouldAutoScrollRef.current) {
-      scrollToBottom();
+    if (justSubmittedRef.current) {
+      justSubmittedRef.current = false;
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, phase, scrollToBottom]);
-
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      shouldAutoScrollRef.current = gap < 150;
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [messages]);
 
   useEffect(() => {
     saveMessages(messages);
@@ -91,8 +76,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       loading: true,
     };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    shouldAutoScrollRef.current = true;
-    scrollToBottom();
+    justSubmittedRef.current = true;
 
     try {
       const resp = await fetch("/api/ask", {
@@ -216,7 +200,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       setLoading(false);
       setPhase("idle");
     }
-  }, [input, loading, filters, phase]);
+  }, [input, loading, filters]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -251,7 +235,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       </div>
 
       {/* Messages */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <div className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center max-w-md">
