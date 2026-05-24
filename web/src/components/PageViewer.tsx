@@ -1,68 +1,41 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
-import OpenSeadragon from "openseadragon";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 interface PageViewerProps {
   imageUrl: string | null;
   className?: string;
 }
 
+const ZOOM_LEVELS = [1, 1.5, 2, 3, 4];
+
 export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<OpenSeadragon.Viewer | null>(null);
-  const currentUrlRef = useRef<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [zoomIdx, setZoomIdx] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
+  const prevUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
-
-    const viewer = OpenSeadragon({
-      element: containerRef.current,
-      showNavigator: false,
-      showZoomControl: false,
-      showHomeControl: false,
-      showFullPageControl: false,
-      showRotationControl: false,
-      animationTime: 0.5,
-      minZoomLevel: 0.3,
-      maxZoomLevel: 10,
-      visibilityRatio: 0.5,
-      constrainDuringPan: true,
-      gestureSettingsMouse: { scrollToZoom: true },
-      gestureSettingsTouch: { pinchToZoom: true },
-    });
-
-    viewer.addHandler("open", () => setLoading(false));
-    viewer.addHandler("open-failed", () => setLoading(false));
-
-    viewerRef.current = viewer;
-
-    return () => {
-      viewer.destroy();
-      viewerRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!viewerRef.current || !imageUrl || imageUrl === currentUrlRef.current)
-      return;
-    currentUrlRef.current = imageUrl;
-    setLoading(true);
-    viewerRef.current.close();
-    viewerRef.current.addSimpleImage({ url: imageUrl });
+    if (imageUrl !== prevUrlRef.current) {
+      prevUrlRef.current = imageUrl;
+      setZoomIdx(0);
+      setLoaded(false);
+      setError(false);
+    }
   }, [imageUrl]);
 
+  const zoom = ZOOM_LEVELS[zoomIdx];
+
   const handleZoomIn = useCallback(() => {
-    viewerRef.current?.viewport.zoomBy(1.5);
+    setZoomIdx((i) => Math.min(i + 1, ZOOM_LEVELS.length - 1));
   }, []);
 
   const handleZoomOut = useCallback(() => {
-    viewerRef.current?.viewport.zoomBy(0.67);
+    setZoomIdx((i) => Math.max(i - 1, 0));
   }, []);
 
-  const handleHome = useCallback(() => {
-    viewerRef.current?.viewport.goHome();
+  const handleFit = useCallback(() => {
+    setZoomIdx(0);
   }, []);
 
   const btnClass =
@@ -72,37 +45,81 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
 
   return (
     <div className={`relative h-full ${className}`}>
-      <div ref={containerRef} className="w-full h-full" />
-
-      {/* Loading indicator */}
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-          <div className="flex items-center gap-2 text-stone-300 text-sm">
-            <span className="inline-block w-5 h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
-            Loading page image...
-          </div>
+      {imageUrl ? (
+        <div
+          className="w-full h-full overflow-auto"
+          style={{ WebkitOverflowScrolling: "touch" }}
+        >
+          {!loaded && !error && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="flex items-center gap-2 text-stone-400 text-sm">
+                <span className="inline-block w-5 h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
+                Loading page...
+              </div>
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center px-6">
+                <p className="text-stone-400 text-sm mb-2">
+                  Could not load the newspaper page image.
+                </p>
+                <a
+                  href={imageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-amber-500 hover:text-amber-400 text-sm underline"
+                >
+                  Open image directly
+                </a>
+              </div>
+            </div>
+          )}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            key={imageUrl}
+            src={imageUrl}
+            alt="Newspaper page scan"
+            onLoad={() => { setLoaded(true); setError(false); }}
+            onError={() => { setLoaded(false); setError(true); }}
+            className="select-none"
+            style={{
+              width: `${zoom * 100}%`,
+              display: error ? "none" : "block",
+            }}
+            draggable={false}
+          />
         </div>
-      )}
-
-      {/* Zoom controls */}
-      <div className="absolute top-3 right-3 flex flex-col gap-1">
-        <button onClick={handleZoomIn} className={btnClass} title="Zoom in">
-          +
-        </button>
-        <button onClick={handleZoomOut} className={btnClass} title="Zoom out">
-          &minus;
-        </button>
-        <button onClick={handleHome} className={`${btnClass} text-sm`} title="Fit to page">
-          Fit
-        </button>
-      </div>
-
-      {/* Empty state */}
-      {!imageUrl && (
+      ) : (
         <div className="absolute inset-0 flex items-center justify-center">
           <p className="text-stone-500 text-sm">
             Click a citation to view the original page
           </p>
+        </div>
+      )}
+
+      {/* Zoom controls */}
+      {imageUrl && loaded && (
+        <div className="absolute top-3 right-3 flex flex-col gap-1">
+          <button
+            onClick={handleZoomIn}
+            disabled={zoomIdx >= ZOOM_LEVELS.length - 1}
+            className={btnClass}
+            title="Zoom in"
+          >
+            +
+          </button>
+          <button
+            onClick={handleZoomOut}
+            disabled={zoomIdx <= 0}
+            className={btnClass}
+            title="Zoom out"
+          >
+            &minus;
+          </button>
+          <button onClick={handleFit} className={`${btnClass} text-sm`} title="Fit to width">
+            Fit
+          </button>
         </div>
       )}
     </div>

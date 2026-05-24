@@ -42,10 +42,25 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
     dateTo: string | null;
   }>({ paperLccn: null, dateFrom: null, dateTo: null });
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const userNearBottomRef = useRef(true);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userNearBottomRef.current = gap < 150;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (userNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -72,6 +87,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       loading: true,
     };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    userNearBottomRef.current = true;
 
     try {
       const resp = await fetch("/api/ask", {
@@ -230,7 +246,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center max-w-md">

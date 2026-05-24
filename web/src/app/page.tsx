@@ -1,14 +1,9 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import dynamic from "next/dynamic";
 import { ChatPane } from "@/components/ChatPane";
+import { PageViewer } from "@/components/PageViewer";
 import type { Citation } from "@/lib/types";
-
-const PageViewer = dynamic(
-  () => import("@/components/PageViewer").then((m) => m.PageViewer),
-  { ssr: false, loading: () => <div className="h-full bg-[#1a1a1a]" /> }
-);
 
 export default function Home() {
   const [viewerImageUrl, setViewerImageUrl] = useState<string | null>(null);
