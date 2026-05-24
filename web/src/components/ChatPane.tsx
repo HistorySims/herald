@@ -66,6 +66,8 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       const decoder = new TextDecoder();
       let buffer = "";
       let streamedText = "";
+      let eventType = "";
+      let lastResponse: AskResponse | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -75,7 +77,6 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        let eventType = "";
         for (const line of lines) {
           if (line.startsWith("event: ")) {
             eventType = line.slice(7);
@@ -96,14 +97,14 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
                   return updated;
                 });
               } else if (eventType === "done") {
-                const response = parsed as AskResponse;
+                lastResponse = parsed as AskResponse;
                 setMessages((prev) => {
                   const updated = [...prev];
                   updated[updated.length - 1] = {
                     role: "assistant",
-                    content: response.text,
-                    citations: response.citations,
-                    refused: response.refused,
+                    content: lastResponse!.text,
+                    citations: lastResponse!.citations,
+                    refused: lastResponse!.refused,
                     loading: false,
                   };
                   return updated;
@@ -117,6 +118,18 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
             }
           }
         }
+      }
+      // Fallback: if stream ended without a done event, finalize the message
+      if (!lastResponse && streamedText) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            role: "assistant",
+            content: streamedText,
+            loading: false,
+          };
+          return updated;
+        });
       }
     } catch (err) {
       const errorMessage =
