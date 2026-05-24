@@ -44,24 +44,28 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const userNearBottomRef = useRef(true);
+  const shouldAutoScrollRef = useRef(true);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    if (phase !== "streaming" && shouldAutoScrollRef.current) {
+      scrollToBottom();
+    }
+  }, [messages, phase, scrollToBottom]);
 
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const onScroll = () => {
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      userNearBottomRef.current = gap < 150;
+      shouldAutoScrollRef.current = gap < 150;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
-
-  useEffect(() => {
-    if (userNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages]);
 
   useEffect(() => {
     saveMessages(messages);
@@ -87,7 +91,8 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       loading: true,
     };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    userNearBottomRef.current = true;
+    shouldAutoScrollRef.current = true;
+    scrollToBottom();
 
     try {
       const resp = await fetch("/api/ask", {
