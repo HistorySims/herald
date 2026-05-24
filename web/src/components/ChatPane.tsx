@@ -5,13 +5,34 @@ import type { Message, Citation, AskResponse } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
 import { FilterControls } from "./FilterControls";
 
+const STORAGE_KEY = "herald-messages";
+
+function loadMessages(): Message[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Message[];
+    return parsed.filter((m) => !m.loading);
+  } catch {
+    return [];
+  }
+}
+
+function saveMessages(messages: Message[]) {
+  try {
+    const completed = messages.filter((m) => !m.loading);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(completed));
+  } catch { /* quota exceeded — silently drop */ }
+}
+
 interface ChatPaneProps {
   onCitationClick: (citation: Citation) => void;
   activeCitationIndex: number | null;
 }
 
 export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(loadMessages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState<"idle" | "searching" | "streaming">("idle");
@@ -26,6 +47,15 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    saveMessages(messages);
+  }, [messages]);
+
+  const handleClearConversation = useCallback(() => {
+    setMessages([]);
+    localStorage.removeItem(STORAGE_KEY);
+  }, []);
 
   const handleSubmit = useCallback(async (overrideQuestion?: string) => {
     const question = (overrideQuestion ?? input).trim();
@@ -159,13 +189,26 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-stone-200 bg-stone-50">
-        <h1 className="text-lg font-serif font-semibold text-stone-800">
-          Herald
-        </h1>
-        <p className="text-xs text-stone-500">
-          Semantic research over historic New York newspapers, 1842&ndash;1846
-        </p>
+      <div className="px-4 py-3 border-b border-stone-200 bg-stone-50 flex items-start justify-between">
+        <div>
+          <h1 className="text-lg font-serif font-semibold text-stone-800">
+            Herald
+          </h1>
+          <p className="text-xs text-stone-500">
+            Semantic research over historic New York newspapers, 1842&ndash;1846
+          </p>
+        </div>
+        {messages.length > 0 && (
+          <button
+            onClick={handleClearConversation}
+            disabled={loading}
+            className="text-xs text-stone-400 hover:text-stone-600 transition-colors
+              border border-stone-300 rounded px-2 py-1 mt-0.5
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            New chat
+          </button>
+        )}
       </div>
 
       {/* Messages */}
