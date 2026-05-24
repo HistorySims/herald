@@ -99,6 +99,43 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       let eventType = "";
       let lastResponse: AskResponse | null = null;
 
+      function processLine(line: string) {
+        if (line.startsWith("event: ")) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          const parsed = JSON.parse(data);
+          if (eventType === "token") {
+            setPhase("streaming");
+            streamedText += parsed.text;
+            setMessages((prev) => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                role: "assistant",
+                content: streamedText,
+                loading: true,
+              };
+              return updated;
+            });
+          } else if (eventType === "done") {
+            lastResponse = parsed as AskResponse;
+            setMessages((prev) => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                role: "assistant",
+                content: lastResponse!.text,
+                citations: lastResponse!.citations,
+                refused: lastResponse!.refused,
+                loading: false,
+              };
+              return updated;
+            });
+          } else if (eventType === "error") {
+            throw new Error(parsed.error);
+          }
+        }
+      }
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -108,48 +145,29 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7);
-          } else if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            try {
-              const parsed = JSON.parse(data);
-              if (eventType === "token") {
-                if (phase !== "streaming") setPhase("streaming");
-                streamedText += parsed.text;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = {
-                    role: "assistant",
-                    content: streamedText,
-                    loading: true,
-                  };
-                  return updated;
-                });
-              } else if (eventType === "done") {
-                lastResponse = parsed as AskResponse;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = {
-                    role: "assistant",
-                    content: lastResponse!.text,
-                    citations: lastResponse!.citations,
-                    refused: lastResponse!.refused,
-                    loading: false,
-                  };
-                  return updated;
-                });
-              } else if (eventType === "error") {
-                throw new Error(parsed.error);
-              }
-            } catch (e) {
-              if (e instanceof SyntaxError) continue;
-              throw e;
-            }
+          try {
+            processLine(line);
+          } catch (e) {
+            if (e instanceof SyntaxError) continue;
+            throw e;
           }
         }
       }
-      // Fallback: if stream ended without a done event, finalize the message
+
+      // Flush: decode any remaining bytes and process leftover buffer
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        for (const line of buffer.split("\n")) {
+          try {
+            processLine(line);
+          } catch (e) {
+            if (e instanceof SyntaxError) continue;
+            throw e;
+          }
+        }
+      }
+
+      // Fallback: if stream ended without a done event, finalize without citations
       if (!lastResponse && streamedText) {
         setMessages((prev) => {
           const updated = [...prev];
