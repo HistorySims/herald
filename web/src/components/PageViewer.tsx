@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import OpenSeadragon from "openseadragon";
 
 interface PageViewerProps {
@@ -12,6 +12,7 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<OpenSeadragon.Viewer | null>(null);
   const currentUrlRef = useRef<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -32,6 +33,9 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
       gestureSettingsTouch: { pinchToZoom: true },
     });
 
+    viewer.addHandler("open", () => setLoading(false));
+    viewer.addHandler("open-failed", () => setLoading(false));
+
     viewerRef.current = viewer;
 
     return () => {
@@ -44,6 +48,7 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
     if (!viewerRef.current || !imageUrl || imageUrl === currentUrlRef.current)
       return;
     currentUrlRef.current = imageUrl;
+    setLoading(true);
     viewerRef.current.close();
     viewerRef.current.addSimpleImage({ url: imageUrl });
   }, [imageUrl]);
@@ -60,34 +65,34 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
     viewerRef.current?.viewport.goHome();
   }, []);
 
+  const btnClass =
+    "w-10 h-10 md:w-8 md:h-8 rounded bg-stone-800/80 text-stone-100 " +
+    "hover:bg-stone-700/90 active:bg-stone-600/90 transition-colors " +
+    "flex items-center justify-center touch-manipulation";
+
   return (
     <div className={`relative h-full ${className}`}>
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* Custom zoom controls */}
+      {/* Loading indicator */}
+      {loading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+          <div className="flex items-center gap-2 text-stone-300 text-sm">
+            <span className="inline-block w-5 h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
+            Loading page image...
+          </div>
+        </div>
+      )}
+
+      {/* Zoom controls */}
       <div className="absolute top-3 right-3 flex flex-col gap-1">
-        <button
-          onClick={handleZoomIn}
-          className="w-8 h-8 rounded bg-stone-800/80 text-stone-100 text-lg
-            hover:bg-stone-700/90 transition-colors flex items-center justify-center"
-          title="Zoom in"
-        >
+        <button onClick={handleZoomIn} className={btnClass} title="Zoom in">
           +
         </button>
-        <button
-          onClick={handleZoomOut}
-          className="w-8 h-8 rounded bg-stone-800/80 text-stone-100 text-lg
-            hover:bg-stone-700/90 transition-colors flex items-center justify-center"
-          title="Zoom out"
-        >
-          -
+        <button onClick={handleZoomOut} className={btnClass} title="Zoom out">
+          &minus;
         </button>
-        <button
-          onClick={handleHome}
-          className="w-8 h-8 rounded bg-stone-800/80 text-stone-100 text-sm
-            hover:bg-stone-700/90 transition-colors flex items-center justify-center"
-          title="Fit to page"
-        >
+        <button onClick={handleHome} className={`${btnClass} text-sm`} title="Fit to page">
           Fit
         </button>
       </div>
@@ -95,11 +100,9 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
       {/* Empty state */}
       {!imageUrl && (
         <div className="absolute inset-0 flex items-center justify-center">
-          <div className="text-center">
-            <p className="text-stone-500 text-sm">
-              Click a citation to view the original page
-            </p>
-          </div>
+          <p className="text-stone-500 text-sm">
+            Click a citation to view the original page
+          </p>
         </div>
       )}
     </div>
