@@ -2,8 +2,8 @@ import { getSupabase } from "./supabase";
 import { embedQuery, rerank } from "./voyage";
 import type { SemanticResult, FtsResult, RankedChunk, ChunkRow } from "./types";
 
-const K_SEM = 50;
-const K_FTS = 50;
+const K_SEM = 20;
+const K_FTS = 20;
 const RRF_K = 60;
 const RERANK_TOP = 20;
 const MMR_LAMBDA = 0.5;
