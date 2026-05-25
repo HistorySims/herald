@@ -174,7 +174,8 @@ export async function retrieve(
 ): Promise<RankedChunk[]> {
   const { paperLccn = null, dateFrom = null, dateTo = null } = options;
 
-  const queryEmbedding = await embedQuery(question);
+  const searchQuery = cleanQueryForFts(question);
+  const queryEmbedding = await embedQuery(searchQuery);
 
   const [semResults, ftsResults] = await Promise.all([
     semanticSearch(queryEmbedding, paperLccn, dateFrom, dateTo),
@@ -189,7 +190,7 @@ export async function retrieve(
   const topMerged = merged.slice(0, 80);
 
   const rerankResults = await rerank(
-    question,
+    searchQuery,
     topMerged.map((c) => c.content),
     RERANK_TOP
   );
