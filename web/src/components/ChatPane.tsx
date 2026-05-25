@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import type { Message, Citation, AskResponse } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
 import { FilterControls } from "./FilterControls";
@@ -42,15 +42,24 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
     dateTo: string | null;
   }>({ paperLccn: null, dateFrom: null, dateTo: null });
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const justSubmittedRef = useRef(false);
+  const savedScrollTopRef = useRef(0);
 
   useEffect(() => {
     if (justSubmittedRef.current) {
       justSubmittedRef.current = false;
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     }
   }, [messages]);
+
+  // Pin scroll position during streaming to fight iOS Safari auto-scroll
+  useLayoutEffect(() => {
+    if (phase === "streaming" && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = savedScrollTopRef.current;
+    }
+  }, [messages, phase]);
 
   useEffect(() => {
     saveMessages(messages);
@@ -113,6 +122,9 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
           if (eventType === "token") {
             setPhase("streaming");
             streamedText += parsed.text;
+            if (scrollContainerRef.current) {
+              savedScrollTopRef.current = scrollContainerRef.current.scrollTop;
+            }
             setMessages((prev) => {
               const updated = [...prev];
               updated[updated.length - 1] = {
@@ -235,7 +247,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <div className="text-center max-w-md">
