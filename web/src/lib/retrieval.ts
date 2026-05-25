@@ -41,14 +41,32 @@ async function semanticSearch(
   return (data ?? []) as SemanticResult[];
 }
 
+const META_PHRASES = [
+  /^find\s+(references?\s+to|mentions?\s+of|articles?\s+(about|on|regarding)|coverage\s+of|reports?\s+(on|of|about))\s+/i,
+  /^(what|how|where|when|why|who)\s+(do|does|did|is|are|was|were)\s+/i,
+  /^(search|look)\s+(for|up)\s+/i,
+  /^(show|give)\s+me\s+/i,
+  /^(tell\s+me\s+about|describe)\s+/i,
+];
+
+function cleanQueryForFts(raw: string): string {
+  let q = raw.trim();
+  for (const re of META_PHRASES) {
+    q = q.replace(re, "");
+  }
+  q = q.replace(/[?.!]+$/, "").trim();
+  return q || raw.trim();
+}
+
 async function ftsSearch(
   query: string,
   paperLccn: string | null,
   dateFrom: string | null,
   dateTo: string | null
 ): Promise<FtsResult[]> {
+  const cleaned = cleanQueryForFts(query);
   const { data, error } = await getSupabase().rpc("match_chunks_fts", {
-    query,
+    query: cleaned,
     match_count: K_FTS,
     filter_paper_lccn: paperLccn,
     filter_date_from: dateFrom,
