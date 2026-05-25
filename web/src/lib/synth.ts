@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { RankedChunk, Citation, AskResponse } from "./types";
 
 const MODEL = "claude-sonnet-4-6";
+const CLASSIFIER_MODEL = "claude-haiku-4-5-20251001";
 const MAX_TOKENS = 2500;
 const TEMPERATURE = 0.2;
 
@@ -43,6 +44,43 @@ Refusal floor. If fewer than two chunks address the question, default \
 to "The corpus does not have enough to support a confident answer — \
 here is what little it does say: ..." Better to be small than wrong.`;
 
+const DISCOVERY_PROMPT = `You are a research assistant grounded in a specific newspaper corpus. \
+You will be given a numbered list of source passages (chunks) from \
+historic New York newspapers — primarily the New-York Daily Tribune \
+(Horace Greeley) — for queries between roughly 1842 and 1846.
+
+The user is asking you to FIND or LIST references, not to synthesize. \
+Your job is to catalog what the sources say, passage by passage. \
+For each relevant chunk, provide a brief one-to-two sentence summary \
+of what it says, citing the source with [N]. Group by theme or date \
+if patterns emerge, but do not over-synthesize — the user wants to \
+see the evidence directly. Include direct quotes when the wording \
+matters.
+
+Citation rule. Every claim must include [N] markers. Do not cite \
+chunks you did not use or invent chunk numbers. If none of the \
+passages are relevant, say so plainly.
+
+Tone. Write like a careful historian's research notes: precise, plain.`;
+
+type QueryMode = "synthesis" | "discovery";
+
+async function classifyQuery(question: string): Promise<QueryMode> {
+  try {
+    const resp = await getClient().messages.create({
+      model: CLASSIFIER_MODEL,
+      max_tokens: 1,
+      temperature: 0,
+      system: "Classify the user's research question. Reply with exactly one character: D if they want to find, list, identify, or locate specific references or passages. S if they want analysis, comparison, synthesis, or explanation. Reply with only D or S.",
+      messages: [{ role: "user", content: question }],
+    });
+    const text = resp.content[0]?.type === "text" ? resp.content[0].text.trim() : "S";
+    return text === "D" ? "discovery" : "synthesis";
+  } catch {
+    return "synthesis";
+  }
+}
+
 const CITE_RE = /\[(\d+)\]/g;
 
 function buildUserMessage(question: string, chunks: RankedChunk[]): string {
@@ -76,13 +114,14 @@ function looksLikeRefusal(text: string): boolean {
 }
 
 async function callClaude(
-  userMessage: string
+  userMessage: string,
+  systemPrompt: string = SYSTEM_PROMPT
 ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const resp = await getClient().messages.create({
     model: MODEL,
     max_tokens: MAX_TOKENS,
     temperature: TEMPERATURE,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
   });
 
@@ -180,13 +219,18 @@ export async function* synthesizeStream(
     return;
   }
 
-  const userMsg = buildUserMessage(question, chunks);
+  const [userMsg, mode] = await Promise.all([
+    Promise.resolve(buildUserMessage(question, chunks)),
+    classifyQuery(question),
+  ]);
+
+  const systemPrompt = mode === "discovery" ? DISCOVERY_PROMPT : SYSTEM_PROMPT;
 
   const stream = getClient().messages.stream({
     model: MODEL,
     max_tokens: MAX_TOKENS,
     temperature: TEMPERATURE,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: [{ role: "user", content: userMsg }],
   });
 
@@ -217,7 +261,7 @@ export async function* synthesizeStream(
       `${JSON.stringify([...new Set(bad)].sort())} that don't exist. Valid chunk ` +
       `numbers are 1..${chunks.length}. Rewrite your answer ` +
       `without inventing chunk numbers.`;
-    const retry = await callClaude(userMsg + reminder);
+    const retry = await callClaude(userMsg + reminder, systemPrompt);
     fullText = retry.text;
     cited = extractCitationIndices(fullText);
     const stillBad = cited.filter((n) => !validIndices.has(n));

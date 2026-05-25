@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import type { Message, Citation, AskResponse } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
 import { FilterControls } from "./FilterControls";
@@ -45,7 +45,6 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const justSubmittedRef = useRef(false);
-  const savedScrollTopRef = useRef(0);
 
   useEffect(() => {
     if (justSubmittedRef.current) {
@@ -54,12 +53,39 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
     }
   }, [messages]);
 
-  // Pin scroll position during streaming to fight iOS Safari auto-scroll
-  useLayoutEffect(() => {
-    if (phase === "streaming" && scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = savedScrollTopRef.current;
-    }
-  }, [messages, phase]);
+  // Pin scroll during streaming: allow touch-initiated scrolls,
+  // block browser auto-scroll that iOS Safari forces when content grows
+  useEffect(() => {
+    if (phase !== "streaming") return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    let pinnedTop = el.scrollTop;
+    let userTouching = false;
+
+    const onTouchStart = () => { userTouching = true; };
+    const onTouchEnd = () => {
+      userTouching = false;
+      pinnedTop = el.scrollTop;
+    };
+    const onScroll = () => {
+      if (!userTouching) {
+        el.scrollTop = pinnedTop;
+      }
+    };
+
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    el.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    el.addEventListener("scroll", onScroll);
+
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [phase]);
 
   useEffect(() => {
     saveMessages(messages);
@@ -122,9 +148,6 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
           if (eventType === "token") {
             setPhase("streaming");
             streamedText += parsed.text;
-            if (scrollContainerRef.current) {
-              savedScrollTopRef.current = scrollContainerRef.current.scrollTop;
-            }
             setMessages((prev) => {
               const updated = [...prev];
               updated[updated.length - 1] = {
