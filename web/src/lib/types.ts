@@ -45,8 +45,11 @@ export interface AskResponse {
   output_tokens: number;
 }
 
+export type ResponseMode = "synthesis" | "research" | "directory";
+
 export interface AskRequest {
   question: string;
+  mode?: ResponseMode;
   paper_lccn?: string | null;
   date_from?: string | null;
   date_to?: string | null;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { Message, Citation, AskResponse } from "@/lib/types";
+import type { Message, Citation, AskResponse, ResponseMode } from "@/lib/types";
 import { MessageBubble } from "./MessageBubble";
 import { FilterControls } from "./FilterControls";
 
@@ -36,6 +36,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState<"idle" | "searching" | "streaming">("idle");
+  const [mode, setMode] = useState<ResponseMode>("synthesis");
   const [filters, setFilters] = useState<{
     paperLccn: string | null;
     dateFrom: string | null;
@@ -119,6 +120,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question,
+          mode,
           paper_lccn: filters.paperLccn,
           date_from: filters.dateFrom,
           date_to: filters.dateTo,
@@ -235,7 +237,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       setLoading(false);
       setPhase("idle");
     }
-  }, [input, loading, filters]);
+  }, [input, loading, filters, mode]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -326,6 +328,28 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
 
       {/* Input */}
       <div className="px-4 py-3 border-t border-stone-200 bg-stone-50 space-y-2">
+        {/* Mode selector */}
+        <div className="flex rounded-lg border border-stone-300 overflow-hidden">
+          {([
+            ["synthesis", "Synthesis"],
+            ["research", "Research"],
+            ["directory", "Directory"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setMode(value)}
+              disabled={loading}
+              className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors
+                disabled:opacity-50 disabled:cursor-not-allowed
+                ${mode === value
+                  ? "bg-amber-800 text-amber-50"
+                  : "bg-white text-stone-600 hover:bg-stone-100"
+                }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <FilterControls
           onFiltersChange={setFilters}
           disabled={loading}

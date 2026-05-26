@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { question, paper_lccn, date_from, date_to } = body;
+  const { question, mode, paper_lccn, date_from, date_to } = body;
 
   if (!question || typeof question !== "string") {
     return new Response(
@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
           dateTo: date_to ?? null,
         });
 
-        for await (const event of synthesizeStream(question, chunks)) {
+        for await (const event of synthesizeStream(question, chunks, mode)) {
           if (event.type === "token") {
             controller.enqueue(
               encoder.encode(`event: token\ndata: ${JSON.stringify({ text: event.text })}\n\n`)

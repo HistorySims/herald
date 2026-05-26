@@ -1,8 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { RankedChunk, Citation, AskResponse } from "./types";
+import type { RankedChunk, Citation, AskResponse, ResponseMode } from "./types";
 
 const MODEL = "claude-sonnet-4-6";
-const CLASSIFIER_MODEL = "claude-haiku-4-5-20251001";
 const MAX_TOKENS = 2500;
 const TEMPERATURE = 0.2;
 
@@ -15,7 +14,7 @@ function getClient(): Anthropic {
   return _client;
 }
 
-const SYSTEM_PROMPT = `You are a research assistant grounded in a specific newspaper corpus. \
+const SYNTHESIS_PROMPT = `You are a research assistant grounded in a specific newspaper corpus. \
 You will be given a numbered list of source passages (chunks) from \
 historic New York newspapers — primarily the New-York Daily Tribune \
 (Horace Greeley) — for queries between roughly 1842 and 1846. \
@@ -44,12 +43,11 @@ Refusal floor. If fewer than two chunks address the question, default \
 to "The corpus does not have enough to support a confident answer — \
 here is what little it does say: ..." Better to be small than wrong.`;
 
-const DISCOVERY_PROMPT = `You are a research assistant grounded in a specific newspaper corpus. \
+const RESEARCH_PROMPT = `You are a research assistant grounded in a specific newspaper corpus. \
 You will be given a numbered list of source passages (chunks) from \
 historic New York newspapers for queries between roughly 1842 and 1846.
 
-The user is asking you to FIND or LIST references. Your job is to be \
-a useful research guide, not just a catalog. Structure your response as:
+The user wants a source-by-source research guide. Structure your response as:
 
 1. **Lead with the richest sources.** Start with whichever 2-3 passages \
 would be most valuable for a researcher to read first. Explain in one \
@@ -76,23 +74,10 @@ Tone. Write like a research librarian handing someone a stack of \
 flagged photocopies: direct, practical, focused on getting them to \
 the primary sources fast.`;
 
-type QueryMode = "synthesis" | "discovery";
-
-async function classifyQuery(question: string): Promise<QueryMode> {
-  try {
-    const resp = await getClient().messages.create({
-      model: CLASSIFIER_MODEL,
-      max_tokens: 1,
-      temperature: 0,
-      system: "Classify the user's research question. Reply with exactly one character: D if they want to find, list, identify, or locate specific references or passages. S if they want analysis, comparison, synthesis, or explanation. Reply with only D or S.",
-      messages: [{ role: "user", content: question }],
-    });
-    const text = resp.content[0]?.type === "text" ? resp.content[0].text.trim() : "S";
-    return text === "D" ? "discovery" : "synthesis";
-  } catch {
-    return "synthesis";
-  }
-}
+const PROMPTS: Record<Exclude<ResponseMode, "directory">, string> = {
+  synthesis: SYNTHESIS_PROMPT,
+  research: RESEARCH_PROMPT,
+};
 
 const CITE_RE = /\[(\d+)\]/g;
 
@@ -128,7 +113,7 @@ function looksLikeRefusal(text: string): boolean {
 
 async function callClaude(
   userMessage: string,
-  systemPrompt: string = SYSTEM_PROMPT
+  systemPrompt: string = SYNTHESIS_PROMPT
 ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const resp = await getClient().messages.create({
     model: MODEL,
@@ -150,13 +135,50 @@ async function callClaude(
   };
 }
 
-export async function synthesize(
+function buildDirectoryResponse(
   question: string,
   chunks: RankedChunk[]
+): AskResponse {
+  const citations: Citation[] = chunks.map((c, i) => ({
+    index: i + 1,
+    chunk_id: c.chunk_id,
+    paper_title: c.paper_title,
+    paper_lccn: c.paper_lccn,
+    date_issued: c.date_issued,
+    page_sequence: c.page_sequence,
+    edition: c.edition,
+    image_url: c.image_url,
+    resource_url: c.resource_url,
+    snippet: c.content.slice(0, 200),
+  }));
+
+  const lines: string[] = [`${chunks.length} sources matched. Sorted by relevance.\n`];
+  chunks.forEach((c, i) => {
+    const n = i + 1;
+    const snippet = c.content.trim().slice(0, 300).replace(/\n+/g, " ");
+    lines.push(
+      `[${n}] ${c.paper_title}, ${c.date_issued}, p.${c.page_sequence}\n` +
+      `"${snippet}${c.content.length > 300 ? "..." : ""}"\n`
+    );
+  });
+
+  return {
+    text: lines.join("\n"),
+    citations,
+    refused: false,
+    input_tokens: 0,
+    output_tokens: 0,
+  };
+}
+
+export async function synthesize(
+  question: string,
+  chunks: RankedChunk[],
+  mode: ResponseMode = "synthesis"
 ): Promise<AskResponse> {
   if (chunks.length === 0) {
     return {
-      text: "The corpus does not have enough to support a confident answer — no passages matched this question.",
+      text: "No passages matched this query.",
       citations: [],
       refused: true,
       input_tokens: 0,
@@ -164,8 +186,13 @@ export async function synthesize(
     };
   }
 
+  if (mode === "directory") {
+    return buildDirectoryResponse(question, chunks);
+  }
+
+  const systemPrompt = PROMPTS[mode];
   const userMsg = buildUserMessage(question, chunks);
-  let { text, inputTokens, outputTokens } = await callClaude(userMsg);
+  let { text, inputTokens, outputTokens } = await callClaude(userMsg, systemPrompt);
 
   const validIndices = new Set(
     Array.from({ length: chunks.length }, (_, i) => i + 1)
@@ -179,7 +206,7 @@ export async function synthesize(
       `${JSON.stringify([...new Set(bad)].sort())} that don't exist. Valid chunk ` +
       `numbers are 1..${chunks.length}. Rewrite your answer ` +
       `without inventing chunk numbers.`;
-    const retry = await callClaude(userMsg + reminder);
+    const retry = await callClaude(userMsg + reminder, systemPrompt);
     text = retry.text;
     inputTokens += retry.inputTokens;
     outputTokens += retry.outputTokens;
@@ -216,28 +243,33 @@ export async function synthesize(
 
 export async function* synthesizeStream(
   question: string,
-  chunks: RankedChunk[]
+  chunks: RankedChunk[],
+  mode: ResponseMode = "synthesis"
 ): AsyncGenerator<
   { type: "token"; text: string } | { type: "done"; response: AskResponse }
 > {
   if (chunks.length === 0) {
-    const response: AskResponse = {
-      text: "The corpus does not have enough to support a confident answer — no passages matched this question.",
-      citations: [],
-      refused: true,
-      input_tokens: 0,
-      output_tokens: 0,
+    yield {
+      type: "done",
+      response: {
+        text: "No passages matched this query.",
+        citations: [],
+        refused: true,
+        input_tokens: 0,
+        output_tokens: 0,
+      },
     };
+    return;
+  }
+
+  if (mode === "directory") {
+    const response = buildDirectoryResponse(question, chunks);
     yield { type: "done", response };
     return;
   }
 
-  const [userMsg, mode] = await Promise.all([
-    Promise.resolve(buildUserMessage(question, chunks)),
-    classifyQuery(question),
-  ]);
-
-  const systemPrompt = mode === "discovery" ? DISCOVERY_PROMPT : SYSTEM_PROMPT;
+  const systemPrompt = PROMPTS[mode];
+  const userMsg = buildUserMessage(question, chunks);
 
   const stream = getClient().messages.stream({
     model: MODEL,
