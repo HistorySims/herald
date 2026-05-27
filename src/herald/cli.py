@@ -15,6 +15,7 @@ import typer
 from rich.console import Console
 
 from herald import db, normalize, settings
+from herald.cluster import ClusterParams, run_pipeline
 from herald.embed import VoyageEmbedder
 from herald.eval import (
     EVAL_QUESTIONS,
@@ -397,6 +398,56 @@ async def _eval(
         # Don't pipe through rich.console (it'll mangle markdown formatting
         # heuristically); use plain print so the user can pipe / redirect.
         print(md)
+
+
+@app.command()
+def cluster(
+    min_cluster_size: int = typer.Option(25, help="HDBSCAN min_cluster_size"),
+    min_samples: int = typer.Option(10, help="HDBSCAN min_samples"),
+    umap_neighbors: int = typer.Option(15, help="UMAP n_neighbors"),
+    umap_min_dist: float = typer.Option(0.1, help="UMAP min_dist"),
+    tier1: int = typer.Option(100, help="Target cluster count for tier 1"),
+    tier2: int = typer.Option(20, help="Target cluster count for tier 2"),
+    tier3: int = typer.Option(5, help="Target cluster count for tier 3"),
+) -> None:
+    """Compute clusters, UMAP projections, and content classifications."""
+    cfg = settings.load()
+    if not cfg.supabase_db_url:
+        raise typer.BadParameter("SUPABASE_DB_URL is not set.")
+
+    params = ClusterParams(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        umap_neighbors=umap_neighbors,
+        umap_min_dist=umap_min_dist,
+        tier1_target=tier1,
+        tier2_target=tier2,
+        tier3_target=tier3,
+    )
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Clustering...", total=None)
+
+        def on_progress(msg: str) -> None:
+            progress.update(task, description=msg)
+
+        result = run_pipeline(cfg.supabase_db_url, params, on_progress)
+
+    console.print(f"\n[bold green]Clustering complete[/bold green]")
+    console.print(f"  run_id: {result.run_id}")
+    console.print(f"  chunks: {result.chunk_count}")
+    console.print(f"  noise reassigned: {result.noise_reassigned}")
+    for tier in sorted(result.tier_counts):
+        console.print(f"  tier {tier}: {result.tier_counts[tier]} clusters")
+    from herald.classify import LABELS
+    for t, count in sorted(result.content_type_counts.items()):
+        console.print(f"  {LABELS.get(t, f'type_{t}')}: {count}")
 
 
 @app.command()

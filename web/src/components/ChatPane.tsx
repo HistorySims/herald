@@ -258,17 +258,26 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
             Semantic research over historic New York newspapers, 1842&ndash;1846
           </p>
         </div>
-        {messages.length > 0 && (
+        <div className="flex items-center gap-2 mt-0.5">
+          <a
+            href="/explore"
+            className="text-xs text-stone-400 hover:text-stone-600 transition-colors
+              border border-stone-300 rounded px-2 py-1"
+          >
+            Explore
+          </a>
+          {messages.length > 0 && (
           <button
             onClick={handleClearConversation}
             disabled={loading}
             className="text-xs text-stone-400 hover:text-stone-600 transition-colors
-              border border-stone-300 rounded px-2 py-1 mt-0.5
+              border border-stone-300 rounded px-2 py-1
               disabled:opacity-50 disabled:cursor-not-allowed"
           >
             New chat
           </button>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Messages */}
