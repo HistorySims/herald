@@ -7,13 +7,18 @@ interface ExploreSidebarProps {
   onTierChange: (tier: number) => void;
   contentFilter: Set<number>;
   onContentFilterChange: (filter: Set<number>) => void;
+  showOutliers: boolean;
+  onShowOutliersChange: (show: boolean) => void;
+  outlierCount?: number;
+  totalCount: number;
+  visibleCount: number;
 }
 
 const TIERS = [
-  { value: 0, label: "Fine", desc: "~500-2000 clusters" },
-  { value: 1, label: "Medium", desc: "~80-150 clusters" },
-  { value: 2, label: "Broad", desc: "~15-25 clusters" },
-  { value: 3, label: "Macro", desc: "~3-7 clusters" },
+  { value: 0, label: "Fine", desc: "Natural HDBSCAN clusters" },
+  { value: 1, label: "Medium", desc: "~50 topic groups" },
+  { value: 2, label: "Broad", desc: "~15 major themes" },
+  { value: 3, label: "Macro", desc: "~5 broad categories" },
 ];
 
 const CONTENT_TYPES = [0, 1, 2, 3];
@@ -23,6 +28,11 @@ export function ExploreSidebar({
   onTierChange,
   contentFilter,
   onContentFilterChange,
+  showOutliers,
+  onShowOutliersChange,
+  outlierCount,
+  totalCount,
+  visibleCount,
 }: ExploreSidebarProps) {
   const toggleContentType = (t: number) => {
     const next = new Set(contentFilter);
@@ -40,8 +50,14 @@ export function ExploreSidebar({
         <h2 className="text-sm font-semibold text-stone-300 mb-1">
           Explore the Corpus
         </h2>
-        <p className="text-xs text-stone-500">
+        <p className="text-xs text-stone-500 mb-2">
           Each dot is a chunk of newspaper text. Color = cluster.
+        </p>
+        <p className="text-xs text-amber-500/90">
+          Tap a dot to see the chunk text & source.
+        </p>
+        <p className="text-xs text-stone-500 mt-1">
+          Showing {visibleCount.toLocaleString()} of {totalCount.toLocaleString()}.
         </p>
       </div>
 
@@ -87,6 +103,29 @@ export function ExploreSidebar({
             </label>
           ))}
         </div>
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-stone-400 uppercase tracking-wide mb-2">
+          Outliers
+        </h3>
+        <label className="flex items-center gap-2 px-3 py-1 cursor-pointer text-sm text-stone-400 hover:text-stone-200">
+          <input
+            type="checkbox"
+            checked={showOutliers}
+            onChange={() => onShowOutliersChange(!showOutliers)}
+            className="rounded border-stone-600 bg-stone-800 text-amber-600 focus:ring-amber-600"
+          />
+          Show outliers (gray)
+          {outlierCount !== undefined && (
+            <span className="text-xs text-stone-500 ml-1">
+              ({outlierCount.toLocaleString()})
+            </span>
+          )}
+        </label>
+        <p className="text-xs text-stone-500 px-3 mt-1">
+          Chunks that didn&apos;t fit any cluster — often junk OCR.
+        </p>
       </div>
     </div>
   );

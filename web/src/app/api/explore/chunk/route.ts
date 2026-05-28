@@ -69,13 +69,9 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const snippet = chunk.content.length > 500
-    ? chunk.content.slice(0, 500) + "..."
-    : chunk.content;
-
   return Response.json({
     chunk_id: chunk.id,
-    content: snippet,
+    content: chunk.content,
     paper_title: paper.title,
     paper_lccn: paper.lccn,
     date_issued: issue.date_issued,

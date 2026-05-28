@@ -2,10 +2,10 @@ export interface ExplorePoints {
   count: number;
   x: Float32Array;
   y: Float32Array;
-  clusterT0: Uint16Array;
-  clusterT1: Uint16Array;
-  clusterT2: Uint16Array;
-  clusterT3: Uint16Array;
+  clusterT0: Int16Array;
+  clusterT1: Int16Array;
+  clusterT2: Int16Array;
+  clusterT3: Int16Array;
   contentType: Uint8Array;
 }
 
@@ -15,20 +15,20 @@ export function parsePointsBinary(buffer: ArrayBuffer): ExplorePoints {
 
   const x = new Float32Array(count);
   const y = new Float32Array(count);
-  const clusterT0 = new Uint16Array(count);
-  const clusterT1 = new Uint16Array(count);
-  const clusterT2 = new Uint16Array(count);
-  const clusterT3 = new Uint16Array(count);
+  const clusterT0 = new Int16Array(count);
+  const clusterT1 = new Int16Array(count);
+  const clusterT2 = new Int16Array(count);
+  const clusterT3 = new Int16Array(count);
   const contentType = new Uint8Array(count);
 
   for (let i = 0; i < count; i++) {
     const offset = 4 + i * 17;
     x[i] = view.getFloat32(offset, true);
     y[i] = view.getFloat32(offset + 4, true);
-    clusterT0[i] = view.getUint16(offset + 8, true);
-    clusterT1[i] = view.getUint16(offset + 10, true);
-    clusterT2[i] = view.getUint16(offset + 12, true);
-    clusterT3[i] = view.getUint16(offset + 14, true);
+    clusterT0[i] = view.getInt16(offset + 8, true);
+    clusterT1[i] = view.getInt16(offset + 10, true);
+    clusterT2[i] = view.getInt16(offset + 12, true);
+    clusterT3[i] = view.getInt16(offset + 14, true);
     contentType[i] = view.getUint8(offset + 16);
   }
 
@@ -71,19 +71,41 @@ export function contentTypeLabel(t: number): string {
   return CONTENT_TYPE_LABELS[t] ?? `Unknown (${t})`;
 }
 
-const TIER_COLORS = [
-  [31, 119, 180],  // blue
-  [255, 127, 14],  // orange
-  [44, 160, 44],   // green
-  [214, 39, 40],   // red
-  [148, 103, 189], // purple
-  [140, 86, 75],   // brown
-  [227, 119, 194], // pink
-  [127, 127, 127], // gray
-  [188, 189, 34],  // olive
-  [23, 190, 207],  // cyan
+const TIER_COLORS: [number, number, number][] = [
+  [31, 119, 180],
+  [255, 127, 14],
+  [44, 160, 44],
+  [214, 39, 40],
+  [148, 103, 189],
+  [140, 86, 75],
+  [227, 119, 194],
+  [188, 189, 34],
+  [23, 190, 207],
+  [255, 187, 120],
+  [152, 223, 138],
+  [255, 152, 150],
+  [197, 176, 213],
+  [196, 156, 148],
+  [247, 182, 210],
+  [199, 199, 199],
+  [219, 219, 141],
+  [158, 218, 229],
+  [174, 199, 232],
+  [255, 215, 0],
+  [0, 200, 200],
+  [255, 105, 180],
+  [100, 200, 100],
+  [200, 100, 200],
+  [255, 165, 0],
 ];
 
+const OUTLIER_COLOR: [number, number, number] = [70, 70, 70];
+
 export function clusterColor(label: number): [number, number, number] {
-  return (TIER_COLORS[label % TIER_COLORS.length] ?? [127, 127, 127]) as [number, number, number];
+  if (label < 0) return OUTLIER_COLOR;
+  return TIER_COLORS[label % TIER_COLORS.length];
+}
+
+export function isOutlier(label: number): boolean {
+  return label < 0;
 }

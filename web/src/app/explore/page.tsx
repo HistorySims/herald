@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { ExploreMap } from "@/components/ExploreMap";
 import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
@@ -19,6 +19,7 @@ export default function ExplorePage() {
   const [contentFilter, setContentFilter] = useState<Set<number>>(
     new Set([0, 1, 2, 3])
   );
+  const [showOutliers, setShowOutliers] = useState(true);
   const [selectedChunk, setSelectedChunk] = useState<ChunkDetailType | null>(
     null
   );
@@ -68,6 +69,25 @@ export default function ExplorePage() {
     [chunkIds]
   );
 
+  const stats = useMemo(() => {
+    if (!points) return { total: 0, visible: 0, outliers: 0 };
+    let outliers = 0;
+    let visible = 0;
+    const clusterArr =
+      tier === 0 ? points.clusterT0 :
+      tier === 1 ? points.clusterT1 :
+      tier === 2 ? points.clusterT2 :
+      points.clusterT3;
+    for (let i = 0; i < points.count; i++) {
+      const isOutlier = clusterArr[i] < 0;
+      if (isOutlier) outliers++;
+      if (!contentFilter.has(points.contentType[i])) continue;
+      if (!showOutliers && isOutlier) continue;
+      visible++;
+    }
+    return { total: points.count, visible, outliers };
+  }, [points, tier, contentFilter, showOutliers]);
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center bg-stone-900">
@@ -104,6 +124,7 @@ export default function ExplorePage() {
           points={points}
           tier={tier}
           contentFilter={contentFilter}
+          showOutliers={showOutliers}
           onPointClick={handlePointClick}
         />
         <div className="absolute top-3 left-3">
@@ -115,7 +136,10 @@ export default function ExplorePage() {
           </a>
         </div>
         <div className="absolute top-3 right-3 text-xs text-stone-500 bg-stone-800/80 px-2 py-1 rounded">
-          {points.count.toLocaleString()} chunks
+          {stats.visible.toLocaleString()} / {stats.total.toLocaleString()} chunks
+        </div>
+        <div className="absolute bottom-3 left-3 text-xs text-stone-500 bg-stone-800/80 px-2 py-1 rounded">
+          Pinch / scroll to zoom · drag to pan · tap a dot
         </div>
       </div>
 
@@ -125,6 +149,11 @@ export default function ExplorePage() {
           onTierChange={setTier}
           contentFilter={contentFilter}
           onContentFilterChange={setContentFilter}
+          showOutliers={showOutliers}
+          onShowOutliersChange={setShowOutliers}
+          outlierCount={stats.outliers}
+          totalCount={stats.total}
+          visibleCount={stats.visible}
         />
         {(selectedChunk || loadingChunk) && (
           <ChunkDetail

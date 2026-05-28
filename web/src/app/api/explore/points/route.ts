@@ -78,10 +78,10 @@ export async function GET() {
     const row = data[i];
     view.setFloat32(offset, row.x, true);
     view.setFloat32(offset + 4, row.y, true);
-    view.setUint16(offset + 8, row.cluster_t0, true);
-    view.setUint16(offset + 10, row.cluster_t1, true);
-    view.setUint16(offset + 12, row.cluster_t2, true);
-    view.setUint16(offset + 14, row.cluster_t3, true);
+    view.setInt16(offset + 8, row.cluster_t0, true);
+    view.setInt16(offset + 10, row.cluster_t1, true);
+    view.setInt16(offset + 12, row.cluster_t2, true);
+    view.setInt16(offset + 14, row.cluster_t3, true);
     view.setUint8(offset + 16, row.content_type);
   }
 

@@ -402,7 +402,8 @@ async def _eval(
 
 @app.command()
 def cluster(
-    n_base_clusters: int = typer.Option(200, help="Number of K-means base clusters (tier 0)"),
+    min_cluster_size: int = typer.Option(15, help="HDBSCAN min_cluster_size"),
+    min_samples: int = typer.Option(5, help="HDBSCAN min_samples"),
     umap_neighbors: int = typer.Option(15, help="UMAP n_neighbors"),
     umap_min_dist: float = typer.Option(0.1, help="UMAP min_dist"),
     tier1: int = typer.Option(50, help="Target cluster count for tier 1"),
@@ -415,7 +416,8 @@ def cluster(
         raise typer.BadParameter("SUPABASE_DB_URL is not set.")
 
     params = ClusterParams(
-        n_base_clusters=n_base_clusters,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
         umap_neighbors=umap_neighbors,
         umap_min_dist=umap_min_dist,
         tier1_target=tier1,

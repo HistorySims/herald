@@ -1,10 +1,13 @@
 """Hierarchical clustering + UMAP projection batch pipeline.
 
 Reads all chunk embeddings from the database, computes:
-1. K-means base clusters (tier 0) — forced even distribution for visualization
+1. HDBSCAN base clusters (tier 0) with leaf method + preserved -1 outlier bin
 2. Agglomerative merge hierarchy (tiers 1-3) with size-weighted centroids
 3. UMAP 2D projection for visualization
 4. Content-type classification (ads, legal, bad OCR)
+
+Outlier chunks (HDBSCAN noise, label -1) keep label -1 at all tiers
+so they remain visually distinguishable in the UI.
 
 Results are written to cluster_runs, clusters, and chunk_projections tables.
 """
@@ -27,7 +30,8 @@ from herald.classify import classify_chunk
 
 @dataclass
 class ClusterParams:
-    n_base_clusters: int = 200
+    min_cluster_size: int = 15
+    min_samples: int = 5
     umap_neighbors: int = 15
     umap_min_dist: float = 0.1
     tier1_target: int = 50
@@ -41,6 +45,7 @@ class ClusterResult:
     chunk_count: int
     tier_counts: dict[int, int] = field(default_factory=dict)
     content_type_counts: dict[int, int] = field(default_factory=dict)
+    outlier_count: int = 0
 
 
 def run_pipeline(
@@ -78,20 +83,20 @@ def run_pipeline(
         log(f"  content={type_counts.get(0,0)} ad={type_counts.get(1,0)} "
             f"legal={type_counts.get(2,0)} bad_ocr={type_counts.get(3,0)}")
 
-        k = min(params.n_base_clusters, n)
-        log(f"Running K-means (k={k})...")
-        t0_labels = _kmeans_cluster(embeddings, k)
-        n_clusters_t0 = int(t0_labels.max()) + 1
-        log(f"  {n_clusters_t0} base clusters")
+        log(f"Running HDBSCAN (leaf, min_cluster_size={params.min_cluster_size})...")
+        t0_labels = _hdbscan_cluster(embeddings, params)
+        outlier_count = int(np.sum(t0_labels == -1))
+        n_real_clusters = int(t0_labels.max()) + 1 if t0_labels.max() >= 0 else 0
+        log(f"  {n_real_clusters} clusters + {outlier_count} outliers ({100*outlier_count/n:.1f}%)")
 
-        log("Computing tier-0 weighted centroids...")
+        log("Computing tier-0 weighted centroids (outliers excluded)...")
         t0_centroids, t0_sizes, t0_date_ranges = _compute_cluster_stats(
-            embeddings, t0_labels, dates, n_clusters_t0
+            embeddings, t0_labels, dates, n_real_clusters
         )
 
         log("Building agglomerative hierarchy (tiers 1-3)...")
         hierarchy = _build_hierarchy(
-            t0_centroids, t0_sizes, t0_labels, n_clusters_t0, params
+            t0_centroids, t0_sizes, n_real_clusters, params
         )
 
         log(f"Running UMAP (n_neighbors={params.umap_neighbors})...")
@@ -102,14 +107,15 @@ def run_pipeline(
         run_id = _write_results(
             conn, params, chunk_ids, xy, t0_labels,
             hierarchy, t0_centroids, t0_sizes, t0_date_ranges,
-            content_types, dates, embeddings, log,
+            content_types, n_real_clusters, log,
         )
 
         result = ClusterResult(
             run_id=run_id,
             chunk_count=n,
-            tier_counts={0: n_clusters_t0},
+            tier_counts={0: n_real_clusters},
             content_type_counts=type_counts,
+            outlier_count=outlier_count,
         )
         for tier, mapping in hierarchy.items():
             result.tier_counts[tier] = len(set(mapping.values()))
@@ -156,17 +162,20 @@ def _load_chunks(
     return chunk_ids, embeddings, dates_list, contents_list
 
 
-def _kmeans_cluster(embeddings: np.ndarray, k: int) -> np.ndarray:
-    from sklearn.cluster import MiniBatchKMeans
+def _hdbscan_cluster(
+    embeddings: np.ndarray,
+    params: ClusterParams,
+) -> np.ndarray:
+    import hdbscan
 
-    kmeans = MiniBatchKMeans(
-        n_clusters=k,
-        batch_size=1024,
-        random_state=42,
-        n_init=3,
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=params.min_cluster_size,
+        min_samples=params.min_samples,
+        metric="euclidean",
+        core_dist_n_jobs=-1,
+        cluster_selection_method="leaf",
     )
-    labels = kmeans.fit_predict(embeddings)
-    return labels
+    return clusterer.fit_predict(embeddings)
 
 
 def _compute_cluster_stats(
@@ -175,6 +184,13 @@ def _compute_cluster_stats(
     dates: list[date],
     n_clusters: int,
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[date, date]]]:
+    if n_clusters == 0:
+        return (
+            np.zeros((0, embeddings.shape[1]), dtype=np.float32),
+            np.zeros(0, dtype=np.int64),
+            [],
+        )
+
     dim = embeddings.shape[1]
     centroids = np.zeros((n_clusters, dim), dtype=np.float64)
     sizes = np.zeros(n_clusters, dtype=np.int64)
@@ -184,7 +200,9 @@ def _compute_cluster_stats(
     date_maxs: dict[int, date] = {}
 
     for i in range(len(labels)):
-        lab = labels[i]
+        lab = int(labels[i])
+        if lab < 0:
+            continue
         centroids[lab] += embeddings[i]
         sizes[lab] += 1
         d = dates[i]
@@ -209,7 +227,6 @@ def _compute_cluster_stats(
 def _build_hierarchy(
     t0_centroids: np.ndarray,
     t0_sizes: np.ndarray,
-    t0_labels: np.ndarray,
     n_t0: int,
     params: ClusterParams,
 ) -> dict[int, dict[int, int]]:
@@ -217,7 +234,7 @@ def _build_hierarchy(
     from scipy.spatial.distance import pdist
 
     if n_t0 <= 1:
-        return {1: {0: 0}, 2: {0: 0}, 3: {0: 0}}
+        return {1: {0: 0} if n_t0 else {}, 2: {0: 0} if n_t0 else {}, 3: {0: 0} if n_t0 else {}}
 
     dists = pdist(t0_centroids, metric="cosine")
     dists = np.nan_to_num(dists, nan=1.0)
@@ -271,8 +288,7 @@ def _write_results(
     t0_sizes: np.ndarray,
     t0_date_ranges: list[tuple[date, date]],
     content_types: np.ndarray,
-    dates: list[date],
-    embeddings: np.ndarray,
+    n_real_clusters: int,
     log: Callable[[str], None],
 ) -> UUID:
     n = len(chunk_ids)
@@ -284,19 +300,20 @@ def _write_results(
             """INSERT INTO cluster_runs (chunk_count, params, status)
                VALUES (%s, %s, 'running') RETURNING id""",
             (n, json.dumps({
-                "n_base_clusters": params.n_base_clusters,
+                "min_cluster_size": params.min_cluster_size,
+                "min_samples": params.min_samples,
                 "umap_neighbors": params.umap_neighbors,
                 "umap_min_dist": params.umap_min_dist,
+                "method": "hdbscan-leaf",
             })),
         )
         run_id = cur.fetchone()[0]
         if not isinstance(run_id, UUID):
             run_id = UUID(str(run_id))
 
-        log(f"  Writing tier-0 clusters ({int(t0_labels.max()) + 1})...")
-        n_t0 = int(t0_labels.max()) + 1
+        log(f"  Writing tier-0 clusters ({n_real_clusters})...")
         t0_db_ids: dict[int, UUID] = {}
-        for lab in range(n_t0):
+        for lab in range(n_real_clusters):
             cur.execute(
                 """INSERT INTO clusters (run_id, tier, label, size, centroid, date_min, date_max)
                    VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -310,10 +327,8 @@ def _write_results(
             if not isinstance(t0_db_ids[lab], UUID):
                 t0_db_ids[lab] = UUID(str(t0_db_ids[lab]))
 
-        prev_tier_ids: dict[int, UUID] = t0_db_ids
-
         for tier in [1, 2, 3]:
-            mapping = hierarchy[tier]
+            mapping = hierarchy.get(tier, {})
             tier_labels_set = sorted(set(mapping.values()))
             log(f"  Writing tier-{tier} clusters ({len(tier_labels_set)})...")
 
@@ -364,7 +379,7 @@ def _write_results(
             else:
                 prev_mapping = hierarchy[tier - 1]
                 prev_to_current: dict[int, int] = {}
-                for t0_lab in range(n_t0):
+                for t0_lab in range(n_real_clusters):
                     prev_lab = prev_mapping[t0_lab]
                     curr_lab = mapping[t0_lab]
                     prev_to_current[prev_lab] = curr_lab
@@ -375,12 +390,10 @@ def _write_results(
                         (tier_db_ids[curr_lab], run_id, tier - 1, prev_lab),
                     )
 
-            prev_tier_ids = tier_db_ids
-
         log(f"  Writing {n} chunk projections...")
-        t1_map = hierarchy[1]
-        t2_map = hierarchy[2]
-        t3_map = hierarchy[3]
+        t1_map = hierarchy.get(1, {})
+        t2_map = hierarchy.get(2, {})
+        t3_map = hierarchy.get(3, {})
 
         batch_size = 5000
         for start in range(0, n, batch_size):
@@ -388,10 +401,16 @@ def _write_results(
             batch_params = []
             for i in range(start, end):
                 t0 = int(t0_labels[i])
+                if t0 < 0:
+                    t1 = t2 = t3 = -1
+                else:
+                    t1 = t1_map.get(t0, -1)
+                    t2 = t2_map.get(t0, -1)
+                    t3 = t3_map.get(t0, -1)
                 batch_params.append((
                     chunk_ids[i], run_id,
                     float(xy[i, 0]), float(xy[i, 1]),
-                    t0, t1_map[t0], t2_map[t0], t3_map[t0],
+                    t0, t1, t2, t3,
                     int(content_types[i]),
                 ))
             cur.executemany(

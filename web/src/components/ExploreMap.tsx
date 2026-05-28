@@ -11,6 +11,7 @@ interface ExploreMapProps {
   points: ExplorePoints;
   tier: number;
   contentFilter: Set<number>;
+  showOutliers: boolean;
   onPointClick: (index: number) => void;
 }
 
@@ -18,13 +19,14 @@ const INITIAL_VIEW_STATE = {
   target: [0.5, 0.5, 0] as [number, number, number],
   zoom: 8,
   minZoom: 4,
-  maxZoom: 16,
+  maxZoom: 18,
 };
 
 export function ExploreMap({
   points,
   tier,
   contentFilter,
+  showOutliers,
   onPointClick,
 }: ExploreMapProps) {
   const clusterArrayForTier = useMemo(() => {
@@ -40,12 +42,12 @@ export function ExploreMap({
   const filteredIndices = useMemo(() => {
     const indices: number[] = [];
     for (let i = 0; i < points.count; i++) {
-      if (contentFilter.has(points.contentType[i])) {
-        indices.push(i);
-      }
+      if (!contentFilter.has(points.contentType[i])) continue;
+      if (!showOutliers && clusterArrayForTier[i] < 0) continue;
+      indices.push(i);
     }
     return indices;
-  }, [points, contentFilter]);
+  }, [points, contentFilter, showOutliers, clusterArrayForTier]);
 
   const handleClick = useCallback(
     (info: { index: number }) => {
@@ -69,16 +71,21 @@ export function ExploreMap({
           const i = filteredIndices[index];
           const label = clusterArrayForTier[i];
           const [r, g, b] = clusterColor(label);
-          return [r, g, b, 200];
+          const alpha = label < 0 ? 100 : 200;
+          return [r, g, b, alpha];
         },
-        getRadius: 1,
+        getRadius: (_: unknown, { index }: { index: number }) => {
+          const i = filteredIndices[index];
+          return clusterArrayForTier[i] < 0 ? 0.5 : 1;
+        },
         radiusMinPixels: 1.5,
-        radiusMaxPixels: 6,
+        radiusMaxPixels: 8,
         pickable: true,
         onClick: handleClick,
         updateTriggers: {
           getPosition: [filteredIndices],
           getFillColor: [tier, filteredIndices],
+          getRadius: [tier, filteredIndices],
         },
       }),
     [points, tier, filteredIndices, clusterArrayForTier, handleClick]
@@ -96,7 +103,9 @@ export function ExploreMap({
       controller={true}
       layers={[layer]}
       style={{ position: "absolute", inset: "0" }}
-      getCursor={() => "crosshair"}
+      getCursor={({ isDragging, isHovering }) =>
+        isDragging ? "grabbing" : isHovering ? "pointer" : "grab"
+      }
     />
   );
 }
