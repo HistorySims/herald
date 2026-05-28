@@ -12,18 +12,29 @@ export async function GET() {
     return Response.json({ error: "No active cluster run" }, { status: 404 });
   }
 
-  const { data, error } = await supabase
-    .from("chunk_projections")
-    .select("chunk_id")
-    .eq("run_id", activeRun.run_id)
-    .order("chunk_id");
+  const allIds: string[] = [];
+  const pageSize = 1000;
+  let offset = 0;
 
-  if (error || !data) {
-    return Response.json({ error: error?.message ?? "No data" }, { status: 500 });
+  while (true) {
+    const { data, error } = await supabase
+      .from("chunk_projections")
+      .select("chunk_id")
+      .eq("run_id", activeRun.run_id)
+      .order("chunk_id")
+      .range(offset, offset + pageSize - 1);
+
+    if (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
+    if (!data || data.length === 0) break;
+
+    allIds.push(...data.map((r: { chunk_id: string }) => r.chunk_id));
+    if (data.length < pageSize) break;
+    offset += pageSize;
   }
 
-  return Response.json(
-    data.map((r: { chunk_id: string }) => r.chunk_id),
-    { headers: { "Cache-Control": "public, max-age=3600" } }
-  );
+  return Response.json(allIds, {
+    headers: { "Cache-Control": "public, max-age=3600" },
+  });
 }

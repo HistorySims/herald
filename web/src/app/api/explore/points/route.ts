@@ -1,5 +1,41 @@
 import { getSupabase } from "@/lib/supabase";
 
+interface ProjectionRow {
+  x: number;
+  y: number;
+  cluster_t0: number;
+  cluster_t1: number;
+  cluster_t2: number;
+  cluster_t3: number;
+  content_type: number;
+  chunk_id: string;
+}
+
+async function fetchAllProjections(runId: string): Promise<ProjectionRow[]> {
+  const supabase = getSupabase();
+  const allRows: ProjectionRow[] = [];
+  const pageSize = 1000;
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("chunk_projections")
+      .select("x, y, cluster_t0, cluster_t1, cluster_t2, cluster_t3, content_type, chunk_id")
+      .eq("run_id", runId)
+      .order("chunk_id")
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+
+    allRows.push(...data);
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return allRows;
+}
+
 export async function GET() {
   const supabase = getSupabase();
 
@@ -17,28 +53,25 @@ export async function GET() {
 
   const runId = activeRun.run_id;
 
-  const { data, error } = await supabase
-    .from("chunk_projections")
-    .select("x, y, cluster_t0, cluster_t1, cluster_t2, cluster_t3, content_type, chunk_id")
-    .eq("run_id", runId)
-    .order("chunk_id");
-
-  if (error) {
-    return Response.json({ error: error.message }, { status: 500 });
+  let data: ProjectionRow[];
+  try {
+    data = await fetchAllProjections(runId);
+  } catch (e) {
+    return Response.json(
+      { error: e instanceof Error ? e.message : "Failed to fetch projections" },
+      { status: 500 }
+    );
   }
 
-  if (!data || data.length === 0) {
+  if (data.length === 0) {
     return Response.json({ error: "No projection data found" }, { status: 404 });
   }
 
   const n = data.length;
-  // 4 + n*17 bytes for point data, then n*36 bytes for chunk_id strings (UUID without dashes = 32 chars, but we'll use 36 with dashes)
-  // Actually, send chunk_ids as a separate JSON array in a header-like structure
-  // Format: 4-byte count + n * 17 bytes point data
   const pointBuf = new ArrayBuffer(4 + n * 17);
   const view = new DataView(pointBuf);
 
-  view.setUint32(0, n, true); // little-endian count
+  view.setUint32(0, n, true);
 
   for (let i = 0; i < n; i++) {
     const offset = 4 + i * 17;
