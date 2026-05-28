@@ -1,7 +1,7 @@
 """Hierarchical clustering + UMAP projection batch pipeline.
 
 Reads all chunk embeddings from the database, computes:
-1. HDBSCAN base clusters (tier 0)
+1. K-means base clusters (tier 0) — forced even distribution for visualization
 2. Agglomerative merge hierarchy (tiers 1-3) with size-weighted centroids
 3. UMAP 2D projection for visualization
 4. Content-type classification (ads, legal, bad OCR)
@@ -27,12 +27,11 @@ from herald.classify import classify_chunk
 
 @dataclass
 class ClusterParams:
-    min_cluster_size: int = 25
-    min_samples: int = 10
+    n_base_clusters: int = 200
     umap_neighbors: int = 15
     umap_min_dist: float = 0.1
-    tier1_target: int = 100
-    tier2_target: int = 20
+    tier1_target: int = 50
+    tier2_target: int = 15
     tier3_target: int = 5
 
 
@@ -42,7 +41,6 @@ class ClusterResult:
     chunk_count: int
     tier_counts: dict[int, int] = field(default_factory=dict)
     content_type_counts: dict[int, int] = field(default_factory=dict)
-    noise_reassigned: int = 0
 
 
 def run_pipeline(
@@ -80,10 +78,11 @@ def run_pipeline(
         log(f"  content={type_counts.get(0,0)} ad={type_counts.get(1,0)} "
             f"legal={type_counts.get(2,0)} bad_ocr={type_counts.get(3,0)}")
 
-        log(f"Running HDBSCAN (min_cluster_size={params.min_cluster_size})...")
-        t0_labels, noise_count = _hdbscan_cluster(embeddings, params)
+        k = min(params.n_base_clusters, n)
+        log(f"Running K-means (k={k})...")
+        t0_labels = _kmeans_cluster(embeddings, k)
         n_clusters_t0 = int(t0_labels.max()) + 1
-        log(f"  {n_clusters_t0} clusters, {noise_count} noise points reassigned")
+        log(f"  {n_clusters_t0} base clusters")
 
         log("Computing tier-0 weighted centroids...")
         t0_centroids, t0_sizes, t0_date_ranges = _compute_cluster_stats(
@@ -111,7 +110,6 @@ def run_pipeline(
             chunk_count=n,
             tier_counts={0: n_clusters_t0},
             content_type_counts=type_counts,
-            noise_reassigned=noise_count,
         )
         for tier, mapping in hierarchy.items():
             result.tier_counts[tier] = len(set(mapping.values()))
@@ -153,54 +151,22 @@ def _load_chunks(
             if batch % 10000 == 0:
                 log(f"  loaded {batch} chunks...")
 
-    conn.commit()  # close the server-side cursor's transaction
+    conn.commit()
     embeddings = np.array(embeddings_list, dtype=np.float32)
     return chunk_ids, embeddings, dates_list, contents_list
 
 
-def _hdbscan_cluster(
-    embeddings: np.ndarray,
-    params: ClusterParams,
-) -> tuple[np.ndarray, int]:
-    import hdbscan
+def _kmeans_cluster(embeddings: np.ndarray, k: int) -> np.ndarray:
+    from sklearn.cluster import MiniBatchKMeans
 
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=params.min_cluster_size,
-        min_samples=params.min_samples,
-        metric="euclidean",
-        core_dist_n_jobs=-1,
-        cluster_selection_method="eom",
+    kmeans = MiniBatchKMeans(
+        n_clusters=k,
+        batch_size=1024,
+        random_state=42,
+        n_init=3,
     )
-    labels = clusterer.fit_predict(embeddings)
-
-    noise_mask = labels == -1
-    noise_count = int(noise_mask.sum())
-
-    if noise_count > 0 and not noise_mask.all():
-        valid_labels = set(labels[~noise_mask])
-        centroids = {}
-        for lab in valid_labels:
-            mask = labels == lab
-            centroids[lab] = embeddings[mask].mean(axis=0)
-
-        centroid_labels = sorted(centroids.keys())
-        centroid_matrix = np.array([centroids[l] for l in centroid_labels])
-
-        noise_indices = np.where(noise_mask)[0]
-        noise_embeddings = embeddings[noise_indices]
-
-        norms_noise = np.linalg.norm(noise_embeddings, axis=1, keepdims=True)
-        norms_centroids = np.linalg.norm(centroid_matrix, axis=1, keepdims=True)
-        norms_noise = np.maximum(norms_noise, 1e-10)
-        norms_centroids = np.maximum(norms_centroids, 1e-10)
-
-        similarities = (noise_embeddings / norms_noise) @ (centroid_matrix / norms_centroids).T
-        best_idx = similarities.argmax(axis=1)
-
-        for i, ni in enumerate(noise_indices):
-            labels[ni] = centroid_labels[best_idx[i]]
-
-    return labels, noise_count
+    labels = kmeans.fit_predict(embeddings)
+    return labels
 
 
 def _compute_cluster_stats(
@@ -263,7 +229,7 @@ def _build_hierarchy(
         target = min(target, n_t0)
         target = max(target, 1)
         tier_labels = fcluster(Z, t=target, criterion="maxclust")
-        tier_labels -= 1  # 0-indexed
+        tier_labels -= 1
         mapping = {t0_lab: int(tier_labels[t0_lab]) for t0_lab in range(n_t0)}
         hierarchy[tier] = mapping
 
@@ -318,8 +284,7 @@ def _write_results(
             """INSERT INTO cluster_runs (chunk_count, params, status)
                VALUES (%s, %s, 'running') RETURNING id""",
             (n, json.dumps({
-                "min_cluster_size": params.min_cluster_size,
-                "min_samples": params.min_samples,
+                "n_base_clusters": params.n_base_clusters,
                 "umap_neighbors": params.umap_neighbors,
                 "umap_min_dist": params.umap_min_dist,
             })),

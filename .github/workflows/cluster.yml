@@ -3,17 +3,17 @@ name: Run Clustering
 on:
   workflow_dispatch:
     inputs:
-      min_cluster_size:
-        description: "HDBSCAN min_cluster_size"
-        default: "25"
+      n_base_clusters:
+        description: "Number of K-means base clusters (tier 0)"
+        default: "200"
         type: string
       tier1_target:
         description: "Tier 1 target cluster count"
-        default: "100"
+        default: "50"
         type: string
       tier2_target:
         description: "Tier 2 target cluster count"
-        default: "20"
+        default: "15"
         type: string
       tier3_target:
         description: "Tier 3 target cluster count"
@@ -40,7 +40,7 @@ jobs:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
           herald cluster \
-            --min-cluster-size ${{ inputs.min_cluster_size }} \
+            --n-base-clusters ${{ inputs.n_base_clusters }} \
             --tier1 ${{ inputs.tier1_target }} \
             --tier2 ${{ inputs.tier2_target }} \
             --tier3 ${{ inputs.tier3_target }}
