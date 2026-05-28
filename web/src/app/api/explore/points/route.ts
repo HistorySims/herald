@@ -10,7 +10,7 @@ export async function GET() {
 
   if (runError || !activeRun) {
     return Response.json(
-      { error: "No active cluster run. Run `herald cluster` first." },
+      { error: `No active cluster run: ${runError?.message ?? "empty result"}` },
       { status: 404 }
     );
   }
