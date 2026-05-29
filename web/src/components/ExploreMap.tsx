@@ -2,7 +2,7 @@
 
 import { useMemo, useCallback } from "react";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 import { OrthographicView } from "@deck.gl/core";
 import type { ExplorePoints } from "@/lib/explore-data";
 import { clusterColor } from "@/lib/explore-data";
@@ -12,6 +12,8 @@ interface ExploreMapProps {
   tier: number;
   contentFilter: Set<number>;
   showOutliers: boolean;
+  selectedIndex: number | null;
+  selectedLabel: string | null;
   onPointClick: (index: number) => void;
 }
 
@@ -27,6 +29,8 @@ export function ExploreMap({
   tier,
   contentFilter,
   showOutliers,
+  selectedIndex,
+  selectedLabel,
   onPointClick,
 }: ExploreMapProps) {
   const clusterArrayForTier = useMemo(() => {
@@ -58,7 +62,7 @@ export function ExploreMap({
     [onPointClick, filteredIndices]
   );
 
-  const layer = useMemo(
+  const dotLayer = useMemo(
     () =>
       new ScatterplotLayer({
         id: "chunks",
@@ -91,6 +95,57 @@ export function ExploreMap({
     [points, tier, filteredIndices, clusterArrayForTier, handleClick]
   );
 
+  const highlightData = useMemo(() => {
+    if (selectedIndex === null) return [];
+    return [{
+      position: [points.x[selectedIndex], points.y[selectedIndex]] as [number, number],
+      label: selectedLabel ?? "",
+    }];
+  }, [selectedIndex, selectedLabel, points]);
+
+  const highlightLayer = useMemo(
+    () =>
+      new ScatterplotLayer({
+        id: "selected-highlight",
+        data: highlightData,
+        getPosition: (d) => [...d.position, 0] as [number, number, number],
+        getFillColor: [0, 0, 0, 0],
+        getLineColor: [255, 255, 255, 255],
+        getRadius: 3,
+        getLineWidth: 1.5,
+        stroked: true,
+        filled: false,
+        radiusMinPixels: 10,
+        radiusMaxPixels: 16,
+        lineWidthMinPixels: 2,
+        lineWidthMaxPixels: 3,
+        pickable: false,
+      }),
+    [highlightData]
+  );
+
+  const labelLayer = useMemo(
+    () =>
+      new TextLayer({
+        id: "selected-label",
+        data: highlightData,
+        getPosition: (d) => [...d.position, 0] as [number, number, number],
+        getText: (d) => d.label,
+        getSize: 13,
+        getColor: [255, 255, 255, 255],
+        getPixelOffset: [18, -2],
+        getTextAnchor: "start",
+        getAlignmentBaseline: "center",
+        fontFamily: "ui-monospace, monospace",
+        fontWeight: 500,
+        background: true,
+        backgroundPadding: [4, 2, 4, 2],
+        getBackgroundColor: [20, 20, 20, 220],
+        pickable: false,
+      }),
+    [highlightData]
+  );
+
   const views = useMemo(
     () => new OrthographicView({ id: "ortho", flipY: true }),
     []
@@ -101,7 +156,7 @@ export function ExploreMap({
       views={views}
       initialViewState={INITIAL_VIEW_STATE}
       controller={true}
-      layers={[layer]}
+      layers={[dotLayer, highlightLayer, labelLayer]}
       style={{ position: "absolute", inset: "0" }}
       getCursor={({ isDragging, isHovering }) =>
         isDragging ? "grabbing" : isHovering ? "pointer" : "grab"

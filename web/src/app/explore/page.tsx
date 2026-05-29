@@ -20,6 +20,7 @@ export default function ExplorePage() {
     new Set([0, 1, 2, 3])
   );
   const [showOutliers, setShowOutliers] = useState(true);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<ChunkDetailType | null>(
     null
   );
@@ -54,6 +55,7 @@ export default function ExplorePage() {
   const handlePointClick = useCallback(
     async (index: number) => {
       if (!chunkIds || !chunkIds[index]) return;
+      setSelectedIndex(index);
       setLoadingChunk(true);
       try {
         const resp = await fetch(
@@ -68,6 +70,15 @@ export default function ExplorePage() {
     },
     [chunkIds]
   );
+
+  const selectedLabel = useMemo(() => {
+    if (!selectedChunk) return null;
+    const paperShort = selectedChunk.paper_title
+      .replace(/\s*\(.*?\)\s*/g, "")
+      .replace(/\b\d{4}-\d{4}\b/g, "")
+      .trim();
+    return `${selectedChunk.date_issued} · ${paperShort}`;
+  }, [selectedChunk]);
 
   const stats = useMemo(() => {
     if (!points) return { total: 0, visible: 0, outliers: 0 };
@@ -125,6 +136,8 @@ export default function ExplorePage() {
           tier={tier}
           contentFilter={contentFilter}
           showOutliers={showOutliers}
+          selectedIndex={selectedIndex}
+          selectedLabel={selectedLabel}
           onPointClick={handlePointClick}
         />
         <div className="absolute top-3 left-3">
@@ -159,7 +172,10 @@ export default function ExplorePage() {
           <ChunkDetail
             chunk={selectedChunk}
             loading={loadingChunk}
-            onClose={() => setSelectedChunk(null)}
+            onClose={() => {
+              setSelectedChunk(null);
+              setSelectedIndex(null);
+            }}
           />
         )}
       </div>
