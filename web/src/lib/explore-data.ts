@@ -35,14 +35,17 @@ export function parsePointsBinary(buffer: ArrayBuffer): ExplorePoints {
   return { count, x, y, clusterT0, clusterT1, clusterT2, clusterT3, contentType };
 }
 
-export function parseDatesBinary(buffer: ArrayBuffer): { count: number; offsets: Uint16Array } {
+export function parseDatesBinary(
+  buffer: ArrayBuffer
+): { count: number; maxOffset: number; offsets: Uint16Array } {
   const view = new DataView(buffer);
   const count = view.getUint32(0, true);
+  const maxOffset = view.getUint32(4, true);
   const offsets = new Uint16Array(count);
   for (let i = 0; i < count; i++) {
-    offsets[i] = view.getUint16(4 + i * 2, true);
+    offsets[i] = view.getUint16(8 + i * 2, true);
   }
-  return { count, offsets };
+  return { count, maxOffset, offsets };
 }
 
 export interface ClusterInfo {

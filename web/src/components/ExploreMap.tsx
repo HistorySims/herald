@@ -12,6 +12,8 @@ interface ExploreMapProps {
   tier: number;
   contentFilter: Set<number>;
   showOutliers: boolean;
+  dateOffsets: Uint16Array | null;
+  dateRange: [number, number] | null;
   selectedIndex: number | null;
   selectedLabel: string | null;
   onPointClick: (index: number) => void;
@@ -29,6 +31,8 @@ export function ExploreMap({
   tier,
   contentFilter,
   showOutliers,
+  dateOffsets,
+  dateRange,
   selectedIndex,
   selectedLabel,
   onPointClick,
@@ -48,10 +52,26 @@ export function ExploreMap({
     for (let i = 0; i < points.count; i++) {
       if (!contentFilter.has(points.contentType[i])) continue;
       if (!showOutliers && clusterArrayForTier[i] < 0) continue;
+      if (dateRange && dateOffsets) {
+        const off = dateOffsets[i];
+        if (off < dateRange[0] || off > dateRange[1]) continue;
+      }
       indices.push(i);
     }
     return indices;
-  }, [points, contentFilter, showOutliers, clusterArrayForTier]);
+  }, [points, contentFilter, showOutliers, clusterArrayForTier, dateRange, dateOffsets]);
+
+  const clusterMateIndices = useMemo(() => {
+    if (selectedIndex === null) return [];
+    const targetLabel = clusterArrayForTier[selectedIndex];
+    if (targetLabel < 0) return [];
+    const mates: number[] = [];
+    for (const i of filteredIndices) {
+      if (i === selectedIndex) continue;
+      if (clusterArrayForTier[i] === targetLabel) mates.push(i);
+    }
+    return mates;
+  }, [selectedIndex, clusterArrayForTier, filteredIndices]);
 
   const handleClick = useCallback(
     (info: { index: number }) => {
@@ -95,6 +115,33 @@ export function ExploreMap({
     [points, tier, filteredIndices, clusterArrayForTier, handleClick]
   );
 
+  const clusterMatesLayer = useMemo(
+    () =>
+      new ScatterplotLayer({
+        id: "cluster-mates",
+        data: { length: clusterMateIndices.length },
+        getPosition: (_: unknown, { index }: { index: number }) => {
+          const i = clusterMateIndices[index];
+          return [points.x[i], points.y[i], 0];
+        },
+        getFillColor: [0, 0, 0, 0],
+        getLineColor: [255, 255, 255, 110],
+        getRadius: 1.6,
+        getLineWidth: 0.5,
+        stroked: true,
+        filled: false,
+        radiusMinPixels: 4,
+        radiusMaxPixels: 9,
+        lineWidthMinPixels: 1,
+        lineWidthMaxPixels: 1.5,
+        pickable: false,
+        updateTriggers: {
+          getPosition: [clusterMateIndices],
+        },
+      }),
+    [points, clusterMateIndices]
+  );
+
   const highlightData = useMemo(() => {
     if (selectedIndex === null) return [];
     return [{
@@ -103,7 +150,7 @@ export function ExploreMap({
     }];
   }, [selectedIndex, selectedLabel, points]);
 
-  const highlightLayer = useMemo(
+  const selectedRingLayer = useMemo(
     () =>
       new ScatterplotLayer({
         id: "selected-highlight",
@@ -112,13 +159,13 @@ export function ExploreMap({
         getFillColor: [0, 0, 0, 0],
         getLineColor: [255, 255, 255, 255],
         getRadius: 3,
-        getLineWidth: 1.5,
+        getLineWidth: 2,
         stroked: true,
         filled: false,
-        radiusMinPixels: 10,
-        radiusMaxPixels: 16,
-        lineWidthMinPixels: 2,
-        lineWidthMaxPixels: 3,
+        radiusMinPixels: 11,
+        radiusMaxPixels: 18,
+        lineWidthMinPixels: 2.5,
+        lineWidthMaxPixels: 4,
         pickable: false,
       }),
     [highlightData]
@@ -133,7 +180,7 @@ export function ExploreMap({
         getText: (d) => d.label,
         getSize: 13,
         getColor: [255, 255, 255, 255],
-        getPixelOffset: [18, -2],
+        getPixelOffset: [20, -2],
         getTextAnchor: "start",
         getAlignmentBaseline: "center",
         fontFamily: "ui-monospace, monospace",
@@ -156,7 +203,7 @@ export function ExploreMap({
       views={views}
       initialViewState={INITIAL_VIEW_STATE}
       controller={true}
-      layers={[dotLayer, highlightLayer, labelLayer]}
+      layers={[dotLayer, clusterMatesLayer, selectedRingLayer, labelLayer]}
       style={{ position: "absolute", inset: "0" }}
       getCursor={({ isDragging, isHovering }) =>
         isDragging ? "grabbing" : isHovering ? "pointer" : "grab"

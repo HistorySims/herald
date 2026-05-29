@@ -4,15 +4,24 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { ExploreMap } from "@/components/ExploreMap";
 import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
+import { TimeFilter } from "@/components/TimeFilter";
 import {
   ExplorePoints,
   parsePointsBinary,
+  parseDatesBinary,
   ChunkDetail as ChunkDetailType,
 } from "@/lib/explore-data";
+
+interface DatesData {
+  offsets: Uint16Array;
+  maxOffset: number;
+  minDate: string;
+}
 
 export default function ExplorePage() {
   const [points, setPoints] = useState<ExplorePoints | null>(null);
   const [chunkIds, setChunkIds] = useState<string[] | null>(null);
+  const [dates, setDates] = useState<DatesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tier, setTier] = useState(2);
@@ -20,6 +29,7 @@ export default function ExplorePage() {
     new Set([0, 1, 2, 3])
   );
   const [showOutliers, setShowOutliers] = useState(true);
+  const [dateRange, setDateRange] = useState<[number, number] | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<ChunkDetailType | null>(
     null
@@ -50,6 +60,27 @@ export default function ExplorePage() {
       .then((r) => r.json())
       .then((ids) => setChunkIds(ids))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    async function loadDates() {
+      try {
+        const resp = await fetch("/api/explore/dates");
+        if (!resp.ok) return;
+        const minDate = resp.headers.get("X-Min-Date") ?? "1845-06-01";
+        const buf = await resp.arrayBuffer();
+        const parsed = parseDatesBinary(buf);
+        setDates({
+          offsets: parsed.offsets,
+          maxOffset: parsed.maxOffset,
+          minDate,
+        });
+        setDateRange([0, parsed.maxOffset]);
+      } catch {
+        // Time filter just won't appear
+      }
+    }
+    loadDates();
   }, []);
 
   const handlePointClick = useCallback(
@@ -94,10 +125,14 @@ export default function ExplorePage() {
       if (isOutlier) outliers++;
       if (!contentFilter.has(points.contentType[i])) continue;
       if (!showOutliers && isOutlier) continue;
+      if (dateRange && dates) {
+        const off = dates.offsets[i];
+        if (off < dateRange[0] || off > dateRange[1]) continue;
+      }
       visible++;
     }
     return { total: points.count, visible, outliers };
-  }, [points, tier, contentFilter, showOutliers]);
+  }, [points, tier, contentFilter, showOutliers, dateRange, dates]);
 
   if (loading) {
     return (
@@ -136,6 +171,8 @@ export default function ExplorePage() {
           tier={tier}
           contentFilter={contentFilter}
           showOutliers={showOutliers}
+          dateOffsets={dates?.offsets ?? null}
+          dateRange={dateRange}
           selectedIndex={selectedIndex}
           selectedLabel={selectedLabel}
           onPointClick={handlePointClick}
@@ -168,6 +205,17 @@ export default function ExplorePage() {
           totalCount={stats.total}
           visibleCount={stats.visible}
         />
+        {dates && dateRange && (
+          <div className="px-4 pb-4">
+            <TimeFilter
+              minDate={dates.minDate}
+              maxDate={dates.minDate}
+              range={dateRange}
+              maxOffset={dates.maxOffset}
+              onChange={setDateRange}
+            />
+          </div>
+        )}
         {(selectedChunk || loadingChunk) && (
           <ChunkDetail
             chunk={selectedChunk}
