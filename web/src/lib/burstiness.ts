@@ -81,3 +81,34 @@ export function computeBurstyTopics(
   topics.sort((a, b) => b.burstiness - a.burstiness);
   return topics.slice(0, limit);
 }
+
+export function pickRepresentativeChunks(
+  points: ExplorePoints,
+  dateOffsets: Uint16Array,
+  chunkIds: string[],
+  tier: number,
+  cluster: number,
+  contentFilter: Set<number>,
+  n: number = 12
+): string[] {
+  const clusterArr = clusterArrayForTier(points, tier);
+  const candidates: { id: string; day: number }[] = [];
+  for (let i = 0; i < points.count; i++) {
+    if (clusterArr[i] !== cluster) continue;
+    if (!contentFilter.has(points.contentType[i])) continue;
+    if (!chunkIds[i]) continue;
+    candidates.push({ id: chunkIds[i], day: dateOffsets[i] });
+  }
+
+  if (candidates.length === 0) return [];
+  if (candidates.length <= n) return candidates.map((c) => c.id);
+
+  candidates.sort((a, b) => a.day - b.day);
+  const step = candidates.length / n;
+  const picked: string[] = [];
+  for (let k = 0; k < n; k++) {
+    const idx = Math.min(Math.floor(k * step), candidates.length - 1);
+    picked.push(candidates[idx].id);
+  }
+  return Array.from(new Set(picked));
+}

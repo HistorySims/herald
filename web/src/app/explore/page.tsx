@@ -6,13 +6,18 @@ import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
 import { TimeFilter } from "@/components/TimeFilter";
 import { BurstyTopics } from "@/components/BurstyTopics";
+import { ClusterStory } from "@/components/ClusterStory";
 import {
   ExplorePoints,
   parsePointsBinary,
   parseDatesBinary,
   ChunkDetail as ChunkDetailType,
 } from "@/lib/explore-data";
-import { computeBurstyTopics, BurstyTopic } from "@/lib/burstiness";
+import {
+  computeBurstyTopics,
+  pickRepresentativeChunks,
+  BurstyTopic,
+} from "@/lib/burstiness";
 
 interface DatesData {
   offsets: Uint16Array;
@@ -40,6 +45,7 @@ export default function ExplorePage() {
   );
   const [loadingChunk, setLoadingChunk] = useState(false);
   const [focusedCluster, setFocusedCluster] = useState<number | null>(null);
+  const [storyChunkIds, setStoryChunkIds] = useState<string[] | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -125,6 +131,23 @@ export default function ExplorePage() {
       8
     );
   }, [points, dates, tier, contentFilter]);
+
+  const handleAskTopic = useCallback(
+    (topic: BurstyTopic) => {
+      if (!points || !dates || !chunkIds) return;
+      const ids = pickRepresentativeChunks(
+        points,
+        dates.offsets,
+        chunkIds,
+        tier,
+        topic.cluster,
+        contentFilter,
+        12
+      );
+      if (ids.length > 0) setStoryChunkIds(ids);
+    },
+    [points, dates, chunkIds, tier, contentFilter]
+  );
 
   const handleTopicClick = useCallback(
     (topic: BurstyTopic) => {
@@ -268,8 +291,16 @@ export default function ExplorePage() {
               minDate={dates.minDate}
               focusedCluster={focusedCluster}
               onTopicClick={handleTopicClick}
+              onAskClick={handleAskTopic}
             />
           </div>
+        )}
+        {storyChunkIds && (
+          <ClusterStory
+            chunkIds={storyChunkIds}
+            question="What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages."
+            onClose={() => setStoryChunkIds(null)}
+          />
         )}
         {(selectedChunk || loadingChunk) && (
           <ChunkDetail
