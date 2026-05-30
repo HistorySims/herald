@@ -16,6 +16,7 @@ interface ExploreMapProps {
   dateRange: [number, number] | null;
   selectedIndex: number | null;
   selectedLabel: string | null;
+  focusedCluster: number | null;
   onPointClick: (index: number) => void;
 }
 
@@ -35,6 +36,7 @@ export function ExploreMap({
   dateRange,
   selectedIndex,
   selectedLabel,
+  focusedCluster,
   onPointClick,
 }: ExploreMapProps) {
   const clusterArrayForTier = useMemo(() => {
@@ -62,16 +64,17 @@ export function ExploreMap({
   }, [points, contentFilter, showOutliers, clusterArrayForTier, dateRange, dateOffsets]);
 
   const clusterMateIndices = useMemo(() => {
-    if (selectedIndex === null) return [];
-    const targetLabel = clusterArrayForTier[selectedIndex];
-    if (targetLabel < 0) return [];
+    const targetLabel =
+      focusedCluster ??
+      (selectedIndex !== null ? clusterArrayForTier[selectedIndex] : null);
+    if (targetLabel === null || targetLabel < 0) return [];
     const mates: number[] = [];
     for (const i of filteredIndices) {
       if (i === selectedIndex) continue;
       if (clusterArrayForTier[i] === targetLabel) mates.push(i);
     }
     return mates;
-  }, [selectedIndex, clusterArrayForTier, filteredIndices]);
+  }, [selectedIndex, focusedCluster, clusterArrayForTier, filteredIndices]);
 
   const handleClick = useCallback(
     (info: { index: number }) => {
@@ -115,6 +118,17 @@ export function ExploreMap({
     [points, tier, filteredIndices, clusterArrayForTier, handleClick]
   );
 
+  const matesLineColor = useMemo<[number, number, number, number]>(() => {
+    if (focusedCluster !== null && focusedCluster >= 0) {
+      const [r, g, b] = clusterColor(focusedCluster);
+      return [r, g, b, 255];
+    }
+    return [255, 255, 255, 110];
+  }, [focusedCluster]);
+
+  const matesLineWidth = focusedCluster !== null ? 1 : 0.5;
+  const matesRadius = focusedCluster !== null ? 2 : 1.6;
+
   const clusterMatesLayer = useMemo(
     () =>
       new ScatterplotLayer({
@@ -125,21 +139,24 @@ export function ExploreMap({
           return [points.x[i], points.y[i], 0];
         },
         getFillColor: [0, 0, 0, 0],
-        getLineColor: [255, 255, 255, 110],
-        getRadius: 1.6,
-        getLineWidth: 0.5,
+        getLineColor: matesLineColor,
+        getRadius: matesRadius,
+        getLineWidth: matesLineWidth,
         stroked: true,
         filled: false,
         radiusMinPixels: 4,
         radiusMaxPixels: 9,
         lineWidthMinPixels: 1,
-        lineWidthMaxPixels: 1.5,
+        lineWidthMaxPixels: 2,
         pickable: false,
         updateTriggers: {
           getPosition: [clusterMateIndices],
+          getLineColor: [matesLineColor],
+          getRadius: [matesRadius],
+          getLineWidth: [matesLineWidth],
         },
       }),
-    [points, clusterMateIndices]
+    [points, clusterMateIndices, matesLineColor, matesLineWidth, matesRadius]
   );
 
   const highlightData = useMemo(() => {

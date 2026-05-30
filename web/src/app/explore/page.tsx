@@ -5,18 +5,22 @@ import { ExploreMap } from "@/components/ExploreMap";
 import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
 import { TimeFilter } from "@/components/TimeFilter";
+import { BurstyTopics } from "@/components/BurstyTopics";
 import {
   ExplorePoints,
   parsePointsBinary,
   parseDatesBinary,
   ChunkDetail as ChunkDetailType,
 } from "@/lib/explore-data";
+import { computeBurstyTopics, BurstyTopic } from "@/lib/burstiness";
 
 interface DatesData {
   offsets: Uint16Array;
   maxOffset: number;
   minDate: string;
 }
+
+const DEFAULT_WINDOW = 14;
 
 export default function ExplorePage() {
   const [points, setPoints] = useState<ExplorePoints | null>(null);
@@ -35,6 +39,7 @@ export default function ExplorePage() {
     null
   );
   const [loadingChunk, setLoadingChunk] = useState(false);
+  const [focusedCluster, setFocusedCluster] = useState<number | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -89,9 +94,7 @@ export default function ExplorePage() {
       setSelectedIndex(index);
       setLoadingChunk(true);
       try {
-        const resp = await fetch(
-          `/api/explore/chunk?id=${chunkIds[index]}`
-        );
+        const resp = await fetch(`/api/explore/chunk?id=${chunkIds[index]}`);
         if (resp.ok) {
           setSelectedChunk(await resp.json());
         }
@@ -111,15 +114,54 @@ export default function ExplorePage() {
     return `${selectedChunk.date_issued} · ${paperShort}`;
   }, [selectedChunk]);
 
+  const burstyTopics = useMemo<BurstyTopic[]>(() => {
+    if (!points || !dates) return [];
+    return computeBurstyTopics(
+      points,
+      dates.offsets,
+      tier,
+      contentFilter,
+      20,
+      8
+    );
+  }, [points, dates, tier, contentFilter]);
+
+  const handleTopicClick = useCallback(
+    (topic: BurstyTopic) => {
+      if (!dates) return;
+      setFocusedCluster(topic.cluster);
+      const width =
+        dateRange && dateRange[1] - dateRange[0] < dates.maxOffset
+          ? dateRange[1] - dateRange[0]
+          : DEFAULT_WINDOW;
+      const half = Math.floor(width / 2);
+      let start = topic.peakDay - half;
+      let end = start + width;
+      if (start < 0) {
+        start = 0;
+        end = width;
+      }
+      if (end > dates.maxOffset) {
+        end = dates.maxOffset;
+        start = Math.max(0, end - width);
+      }
+      setDateRange([start, end]);
+    },
+    [dates, dateRange]
+  );
+
   const stats = useMemo(() => {
     if (!points) return { total: 0, visible: 0, outliers: 0 };
     let outliers = 0;
     let visible = 0;
     const clusterArr =
-      tier === 0 ? points.clusterT0 :
-      tier === 1 ? points.clusterT1 :
-      tier === 2 ? points.clusterT2 :
-      points.clusterT3;
+      tier === 0
+        ? points.clusterT0
+        : tier === 1
+        ? points.clusterT1
+        : tier === 2
+        ? points.clusterT2
+        : points.clusterT3;
     for (let i = 0; i < points.count; i++) {
       const isOutlier = clusterArr[i] < 0;
       if (isOutlier) outliers++;
@@ -175,6 +217,7 @@ export default function ExplorePage() {
           dateRange={dateRange}
           selectedIndex={selectedIndex}
           selectedLabel={selectedLabel}
+          focusedCluster={focusedCluster}
           onPointClick={handlePointClick}
         />
         <div className="absolute top-3 left-3">
@@ -196,7 +239,10 @@ export default function ExplorePage() {
       <div className="w-full md:w-72 lg:w-80 border-t md:border-t-0 md:border-l border-stone-700 bg-stone-900 overflow-y-auto">
         <ExploreSidebar
           tier={tier}
-          onTierChange={setTier}
+          onTierChange={(t) => {
+            setTier(t);
+            setFocusedCluster(null);
+          }}
           contentFilter={contentFilter}
           onContentFilterChange={setContentFilter}
           showOutliers={showOutliers}
@@ -209,10 +255,19 @@ export default function ExplorePage() {
           <div className="px-4 pb-4">
             <TimeFilter
               minDate={dates.minDate}
-              maxDate={dates.minDate}
               range={dateRange}
               maxOffset={dates.maxOffset}
               onChange={setDateRange}
+            />
+          </div>
+        )}
+        {dates && burstyTopics.length > 0 && (
+          <div className="px-4 pb-4">
+            <BurstyTopics
+              topics={burstyTopics}
+              minDate={dates.minDate}
+              focusedCluster={focusedCluster}
+              onTopicClick={handleTopicClick}
             />
           </div>
         )}
