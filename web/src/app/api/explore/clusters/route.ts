@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
 
   const { data, error } = await supabase
     .from("clusters")
-    .select("label, size, date_min, date_max, parent_id")
+    .select("label, size, date_min, date_max, parent_id, label_text")
     .eq("run_id", activeRun.run_id)
     .eq("tier", tier)
     .order("label");

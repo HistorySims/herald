@@ -442,9 +442,10 @@ def cluster(
     console.print(f"\n[bold green]Clustering complete[/bold green]")
     console.print(f"  run_id: {result.run_id}")
     console.print(f"  chunks: {result.chunk_count}")
-    console.print(f"  noise reassigned: {result.noise_reassigned}")
+    console.print(f"  outliers: {result.outlier_count}")
     for tier in sorted(result.tier_counts):
         console.print(f"  tier {tier}: {result.tier_counts[tier]} clusters")
+    console.print(f"  labels generated: {result.labels_generated}")
     from herald.classify import LABELS
     for t, count in sorted(result.content_type_counts.items()):
         console.print(f"  {LABELS.get(t, f'type_{t}')}: {count}")

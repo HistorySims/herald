@@ -14,7 +14,9 @@ Results are written to cluster_runs, clusters, and chunk_projections tables.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -46,6 +48,31 @@ class ClusterResult:
     tier_counts: dict[int, int] = field(default_factory=dict)
     content_type_counts: dict[int, int] = field(default_factory=dict)
     outlier_count: int = 0
+    labels_generated: int = 0
+
+
+LABEL_SYSTEM_PROMPT = """You will be given several short passages from 1840s New York newspapers that share semantic similarity. Identify their shared topic in 3 to 8 words. Be specific about people, places, or events. Avoid prefixes like "newspaper articles about" or "passages discussing" — just name the topic directly.
+
+Good labels:
+- Anti-Rent disturbances in Hudson Valley
+- Sheriff Steele killing, August 1845
+- Texas annexation debate
+- Shipping arrivals at New York port
+- Mexican-American border tensions
+- Police court arrests and assaults
+- Stock prices and bank notices
+
+Bad labels:
+- Newspaper articles about various topics
+- Multiple events happening in 1845
+- Articles discussing politics
+
+Respond with ONLY the label. No preamble, no explanation."""
+
+
+LABEL_MIN_SIZE = 25
+LABEL_REP_CHUNKS = 5
+LABEL_MAX_CONCURRENT = 8
 
 
 def run_pipeline(
@@ -120,6 +147,31 @@ def run_pipeline(
         for tier, mapping in hierarchy.items():
             result.tier_counts[tier] = len(set(mapping.values()))
 
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        if anthropic_key:
+            log("Building label items...")
+            items = _build_label_items(
+                t0_labels, contents, embeddings,
+                t0_centroids, t0_sizes, hierarchy,
+            )
+            log(f"Labeling {len(items)} clusters via Haiku (concurrent={LABEL_MAX_CONCURRENT})...")
+            results = asyncio.run(_label_clusters_async(anthropic_key, items, log))
+            written = 0
+            with conn.transaction():
+                cur = conn.cursor()
+                for tier, label, text in results:
+                    if text is None:
+                        continue
+                    cur.execute(
+                        "UPDATE clusters SET label_text = %s WHERE run_id = %s AND tier = %s AND label = %s",
+                        (text, run_id, tier, label),
+                    )
+                    written += 1
+            result.labels_generated = written
+            log(f"  Wrote {written} cluster labels")
+        else:
+            log("ANTHROPIC_API_KEY not set, skipping cluster labels")
+
         log(f"Done. run_id={run_id}")
         return result
 
@@ -160,6 +212,100 @@ def _load_chunks(
     conn.commit()
     embeddings = np.array(embeddings_list, dtype=np.float32)
     return chunk_ids, embeddings, dates_list, contents_list
+
+
+async def _label_clusters_async(
+    api_key: str,
+    items: list[dict],
+    log: Callable[[str], None],
+) -> list[tuple[int, int, str | None]]:
+    """Generate labels for clusters using Haiku. Returns [(tier, label, label_text), ...]."""
+    import anthropic
+
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    semaphore = asyncio.Semaphore(LABEL_MAX_CONCURRENT)
+    done_count = [0]
+
+    async def label_one(item):
+        async with semaphore:
+            user_msg = "\n\n---\n\n".join(item["contents"])
+            try:
+                msg = await client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=40,
+                    temperature=0,
+                    system=LABEL_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_msg}],
+                )
+                text = ""
+                for block in msg.content:
+                    if hasattr(block, "text"):
+                        text += block.text
+                label = text.strip().splitlines()[0].strip() if text.strip() else None
+                if label and len(label) > 120:
+                    label = label[:120]
+            except Exception:
+                label = None
+            done_count[0] += 1
+            if done_count[0] % 20 == 0:
+                log(f"    labeled {done_count[0]}/{len(items)}")
+            return (item["tier"], item["label"], label)
+
+    return await asyncio.gather(*[label_one(it) for it in items])
+
+
+def _build_label_items(
+    t0_labels: np.ndarray,
+    contents: list[str],
+    embeddings: np.ndarray,
+    t0_centroids: np.ndarray,
+    t0_sizes: np.ndarray,
+    hierarchy: dict[int, dict[int, int]],
+) -> list[dict]:
+    """For each cluster (tier 0-3, size >= LABEL_MIN_SIZE), pick representative chunks."""
+    items: list[dict] = []
+
+    # Per-cluster member indices for tier 0
+    t0_members: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(t0_labels)):
+        lab = int(t0_labels[i])
+        if lab >= 0:
+            t0_members[lab].append(i)
+
+    # Tier 0: for each cluster, pick chunks closest to its centroid
+    for t0_lab, members in t0_members.items():
+        if t0_sizes[t0_lab] < LABEL_MIN_SIZE:
+            continue
+        member_indices = np.array(members)
+        member_embeddings = embeddings[member_indices]
+        centroid = t0_centroids[t0_lab]
+        dists = np.linalg.norm(member_embeddings - centroid, axis=1)
+        top = np.argsort(dists)[:LABEL_REP_CHUNKS]
+        rep_indices = member_indices[top]
+        rep_contents = [contents[i][:400] for i in rep_indices]
+        items.append({"tier": 0, "label": t0_lab, "contents": rep_contents})
+
+    # Higher tiers: group t0 clusters by their tier-N label, then pick top chunks
+    for tier in [1, 2, 3]:
+        mapping = hierarchy.get(tier, {})
+        per_upper: dict[int, list[int]] = defaultdict(list)
+        for t0_lab, upper_lab in mapping.items():
+            per_upper[upper_lab].extend(t0_members.get(t0_lab, []))
+
+        for upper_lab, members in per_upper.items():
+            if len(members) < LABEL_MIN_SIZE:
+                continue
+            member_indices = np.array(members)
+            member_embeddings = embeddings[member_indices]
+            # Weighted centroid for this tier (we can recompute from members directly)
+            centroid = member_embeddings.mean(axis=0)
+            dists = np.linalg.norm(member_embeddings - centroid, axis=1)
+            top = np.argsort(dists)[:LABEL_REP_CHUNKS]
+            rep_indices = member_indices[top]
+            rep_contents = [contents[i][:400] for i in rep_indices]
+            items.append({"tier": tier, "label": upper_lab, "contents": rep_contents})
+
+    return items
 
 
 def _hdbscan_cluster(

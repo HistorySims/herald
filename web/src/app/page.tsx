@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { ChatPane } from "@/components/ChatPane";
+import { useState, useCallback, useEffect } from "react";
+import { ChatPane, type ScopeInfo } from "@/components/ChatPane";
 import { PageViewer } from "@/components/PageViewer";
 import type { Citation } from "@/lib/types";
 
@@ -16,6 +16,7 @@ export default function Home() {
     page: number;
   } | null>(null);
   const [showViewer, setShowViewer] = useState(false);
+  const [scope, setScope] = useState<ScopeInfo | null>(null);
 
   const handleCitationClick = useCallback((citation: Citation) => {
     setViewerImageUrl(citation.image_url);
@@ -28,9 +29,41 @@ export default function Home() {
     setShowViewer(true);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const tierStr = params.get("scope_tier");
+    const labelStr = params.get("scope_label");
+    if (tierStr === null || labelStr === null) return;
+    const tier = parseInt(tierStr, 10);
+    const label = parseInt(labelStr, 10);
+    if (isNaN(tier) || isNaN(label)) return;
+
+    fetch(`/api/explore/clusters?tier=${tier}`)
+      .then((r) => r.json())
+      .then((data: { label: number; size: number; label_text: string | null }[]) => {
+        const match = data.find((c) => c.label === label);
+        if (match) {
+          setScope({
+            tier,
+            label,
+            labelText: match.label_text,
+            size: match.size,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleClearScope = useCallback(() => {
+    setScope(null);
+    if (typeof window !== "undefined") {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
   return (
     <div className="h-full flex flex-col md:flex-row">
-      {/* Chat pane — full height when viewer closed, half on mobile when open */}
       <div
         className={`${
           showViewer
@@ -41,20 +74,19 @@ export default function Home() {
         <ChatPane
           onCitationClick={handleCitationClick}
           activeCitationIndex={activeCitationIndex}
+          scope={scope}
+          onClearScope={handleClearScope}
         />
       </div>
 
-      {/* Viewer pane */}
       {showViewer && (
         <div className="flex-1 flex flex-col bg-[#1a1a1a] min-h-0 h-full">
-          {/* Viewer header */}
           {viewerMeta && (
             <div className="px-3 py-2 bg-stone-900 border-b border-stone-700 flex items-center justify-between flex-shrink-0">
               <div className="text-xs text-stone-400 font-mono truncate mr-2">
                 {viewerMeta.paper} &middot; {viewerMeta.date} &middot; p.{viewerMeta.page}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {/* Mobile: back to chat */}
                 <button
                   onClick={() => {
                     setShowViewer(false);
@@ -65,7 +97,6 @@ export default function Home() {
                 >
                   Back to chat
                 </button>
-                {/* Desktop: close viewer */}
                 <button
                   onClick={() => {
                     setShowViewer(false);

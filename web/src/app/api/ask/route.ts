@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { retrieve } from "@/lib/retrieval";
+import { retrieve, retrieveScoped } from "@/lib/retrieval";
 import { synthesizeStream } from "@/lib/synth";
 import type { AskRequest } from "@/lib/types";
 
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { question, mode, paper_lccn, date_from, date_to } = body;
+  const { question, mode, paper_lccn, date_from, date_to, scope_tier, scope_label } = body;
 
   if (!question || typeof question !== "string") {
     return new Response(
@@ -66,11 +66,16 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const chunks = await retrieve(question, {
-          paperLccn: paper_lccn ?? null,
-          dateFrom: date_from ?? null,
-          dateTo: date_to ?? null,
-        });
+        const isScoped =
+          scope_tier !== null && scope_tier !== undefined &&
+          scope_label !== null && scope_label !== undefined;
+        const chunks = isScoped
+          ? await retrieveScoped(question, scope_tier!, scope_label!)
+          : await retrieve(question, {
+              paperLccn: paper_lccn ?? null,
+              dateFrom: date_from ?? null,
+              dateTo: date_to ?? null,
+            });
 
         for await (const event of synthesizeStream(question, chunks, mode)) {
           if (event.type === "token") {

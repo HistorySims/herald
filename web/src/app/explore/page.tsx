@@ -12,6 +12,7 @@ import {
   parsePointsBinary,
   parseDatesBinary,
   ChunkDetail as ChunkDetailType,
+  ClusterInfo,
 } from "@/lib/explore-data";
 import {
   computeBurstyTopics,
@@ -46,6 +47,9 @@ export default function ExplorePage() {
   const [loadingChunk, setLoadingChunk] = useState(false);
   const [focusedCluster, setFocusedCluster] = useState<number | null>(null);
   const [storyChunkIds, setStoryChunkIds] = useState<string[] | null>(null);
+  const [clusterInfo, setClusterInfo] = useState<Map<number, ClusterInfo>>(
+    new Map()
+  );
 
   useEffect(() => {
     async function load() {
@@ -72,6 +76,17 @@ export default function ExplorePage() {
       .then((ids) => setChunkIds(ids))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetch(`/api/explore/clusters?tier=${tier}`)
+      .then((r) => r.json())
+      .then((data: ClusterInfo[]) => {
+        const map = new Map<number, ClusterInfo>();
+        for (const c of data) map.set(c.label, c);
+        setClusterInfo(map);
+      })
+      .catch(() => setClusterInfo(new Map()));
+  }, [tier]);
 
   useEffect(() => {
     async function loadDates() {
@@ -147,6 +162,13 @@ export default function ExplorePage() {
       if (ids.length > 0) setStoryChunkIds(ids);
     },
     [points, dates, chunkIds, tier, contentFilter]
+  );
+
+  const handleSearchTopic = useCallback(
+    (topic: BurstyTopic) => {
+      window.location.href = `/?scope_tier=${tier}&scope_label=${topic.cluster}`;
+    },
+    [tier]
   );
 
   const handleTopicClick = useCallback(
@@ -290,8 +312,17 @@ export default function ExplorePage() {
               topics={burstyTopics}
               minDate={dates.minDate}
               focusedCluster={focusedCluster}
+              clusterLabels={
+                new Map(
+                  Array.from(clusterInfo.entries()).map(([k, v]) => [
+                    k,
+                    v.label_text,
+                  ])
+                )
+              }
               onTopicClick={handleTopicClick}
               onAskClick={handleAskTopic}
+              onSearchClick={handleSearchTopic}
             />
           </div>
         )}

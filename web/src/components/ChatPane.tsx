@@ -26,12 +26,26 @@ function saveMessages(messages: Message[]) {
   } catch { /* quota exceeded — silently drop */ }
 }
 
+export interface ScopeInfo {
+  tier: number;
+  label: number;
+  labelText: string | null;
+  size: number;
+}
+
 interface ChatPaneProps {
   onCitationClick: (citation: Citation) => void;
   activeCitationIndex: number | null;
+  scope?: ScopeInfo | null;
+  onClearScope?: () => void;
 }
 
-export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps) {
+export function ChatPane({
+  onCitationClick,
+  activeCitationIndex,
+  scope,
+  onClearScope,
+}: ChatPaneProps) {
   const [messages, setMessages] = useState<Message[]>(loadMessages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -124,6 +138,8 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
           paper_lccn: filters.paperLccn,
           date_from: filters.dateFrom,
           date_to: filters.dateTo,
+          scope_tier: scope?.tier,
+          scope_label: scope?.label,
         }),
       });
 
@@ -237,7 +253,7 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
       setLoading(false);
       setPhase("idle");
     }
-  }, [input, loading, filters, mode]);
+  }, [input, loading, filters, mode, scope]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -249,6 +265,23 @@ export function ChatPane({ onCitationClick, activeCitationIndex }: ChatPaneProps
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
+      {scope && (
+        <div className="px-4 py-2 bg-amber-100 border-b border-amber-300 flex items-center justify-between gap-2">
+          <div className="text-xs text-amber-900 truncate">
+            <span className="font-medium">Searching cluster:</span>{" "}
+            {scope.labelText ?? `Tier ${scope.tier} #${scope.label}`}{" "}
+            <span className="text-amber-700">({scope.size} chunks)</span>
+          </div>
+          {onClearScope && (
+            <button
+              onClick={onClearScope}
+              className="text-xs text-amber-900 hover:text-amber-950 underline flex-shrink-0"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
       <div className="px-4 py-3 border-b border-stone-200 bg-stone-50 flex items-start justify-between">
         <div>
           <h1 className="text-lg font-serif font-semibold text-stone-800">

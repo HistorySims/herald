@@ -53,6 +53,8 @@ export interface AskRequest {
   paper_lccn?: string | null;
   date_from?: string | null;
   date_to?: string | null;
+  scope_tier?: number | null;
+  scope_label?: number | null;
 }
 
 export interface Message {

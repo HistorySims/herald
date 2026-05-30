@@ -54,6 +54,7 @@ export interface ClusterInfo {
   date_min: string | null;
   date_max: string | null;
   parent_id: string | null;
+  label_text: string | null;
 }
 
 export interface ChunkDetail {

@@ -7,8 +7,10 @@ interface BurstyTopicsProps {
   topics: BurstyTopic[];
   minDate: string;
   focusedCluster: number | null;
+  clusterLabels?: Map<number, string | null>;
   onTopicClick: (topic: BurstyTopic) => void;
   onAskClick: (topic: BurstyTopic) => void;
+  onSearchClick: (topic: BurstyTopic) => void;
 }
 
 function offsetToShortDate(minDate: string, offset: number): string {
@@ -24,8 +26,10 @@ export function BurstyTopics({
   topics,
   minDate,
   focusedCluster,
+  clusterLabels,
   onTopicClick,
   onAskClick,
+  onSearchClick,
 }: BurstyTopicsProps) {
   if (topics.length === 0) return null;
 
@@ -43,6 +47,7 @@ export function BurstyTopics({
         {topics.map((t) => {
           const [r, g, b] = clusterColor(t.cluster);
           const isFocused = focusedCluster === t.cluster;
+          const labelText = clusterLabels?.get(t.cluster);
           return (
             <div
               key={t.cluster}
@@ -50,33 +55,45 @@ export function BurstyTopics({
             >
               <button
                 onClick={() => onTopicClick(t)}
-                className={`w-full text-left px-2 py-1.5 rounded-t text-xs transition-colors flex items-center gap-2 ${
+                className={`w-full text-left px-2 py-1.5 rounded-t text-xs transition-colors flex items-start gap-2 ${
                   isFocused
                     ? "text-stone-100"
                     : "text-stone-400 hover:bg-stone-800 hover:text-stone-200"
                 }`}
               >
                 <span
-                  className="inline-block w-3 h-3 rounded-full flex-shrink-0"
+                  className="inline-block w-3 h-3 rounded-full flex-shrink-0 mt-0.5"
                   style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
                 />
-                <span className="flex-1">
-                  <span className="font-mono">
-                    {offsetToShortDate(minDate, t.peakDay)}
-                  </span>{" "}
-                  &middot; peak {t.peakCount}
-                </span>
-                <span className="text-stone-500 text-[10px] flex-shrink-0">
-                  B={t.burstiness.toFixed(2)} &middot; n={t.size}
+                <span className="flex-1 min-w-0">
+                  {labelText && (
+                    <span className="block text-stone-200 font-medium leading-tight mb-0.5">
+                      {labelText}
+                    </span>
+                  )}
+                  <span className="block text-stone-500 text-[10px]">
+                    <span className="font-mono">
+                      {offsetToShortDate(minDate, t.peakDay)}
+                    </span>{" "}
+                    &middot; peak {t.peakCount} &middot; B={t.burstiness.toFixed(2)} &middot; n={t.size}
+                  </span>
                 </span>
               </button>
               {isFocused && (
-                <button
-                  onClick={() => onAskClick(t)}
-                  className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300 border-t border-stone-800"
-                >
-                  → What&apos;s this story?
-                </button>
+                <div className="border-t border-stone-800">
+                  <button
+                    onClick={() => onAskClick(t)}
+                    className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300"
+                  >
+                    → What&apos;s this story?
+                  </button>
+                  <button
+                    onClick={() => onSearchClick(t)}
+                    className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300 border-t border-stone-800"
+                  >
+                    → Search within this cluster
+                  </button>
+                </div>
               )}
             </div>
           );

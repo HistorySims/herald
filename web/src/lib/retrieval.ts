@@ -164,6 +164,97 @@ function mmrDiversify(
   return selected;
 }
 
+interface ScopedChunkRow {
+  chunk_id: string;
+  chunks: {
+    id: string;
+    content: string;
+    page_id: string;
+    pages: {
+      sequence: number;
+      image_url: string;
+      issues: {
+        date_issued: string;
+        edition: number;
+        papers: { lccn: string; title: string } | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+export async function retrieveScoped(
+  question: string,
+  scopeTier: number,
+  scopeLabel: number
+): Promise<RankedChunk[]> {
+  const supabase = getSupabase();
+
+  const { data: activeRun } = await supabase
+    .from("active_cluster_run")
+    .select("run_id")
+    .single();
+  if (!activeRun) return [];
+
+  const tierCol = `cluster_t${scopeTier}` as
+    | "cluster_t0" | "cluster_t1" | "cluster_t2" | "cluster_t3";
+
+  const allRows: ScopedChunkRow[] = [];
+  const pageSize = 1000;
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from("chunk_projections")
+      .select(
+        "chunk_id, chunks!inner(id, content, page_id, pages!inner(sequence, image_url, issues!inner(date_issued, edition, papers!inner(lccn, title))))"
+      )
+      .eq("run_id", activeRun.run_id)
+      .eq(tierCol, scopeLabel)
+      .order("chunk_id")
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error(`Scoped fetch failed: ${error.message}`);
+    if (!data || data.length === 0) break;
+    allRows.push(...(data as unknown as ScopedChunkRow[]));
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  if (allRows.length === 0) return [];
+
+  const chunks: RankedChunk[] = [];
+  for (const row of allRows) {
+    const c = row.chunks;
+    if (!c?.pages?.issues?.papers) continue;
+    chunks.push({
+      chunk_id: c.id,
+      content: c.content,
+      page_id: c.page_id,
+      paper_lccn: c.pages.issues.papers.lccn,
+      paper_title: c.pages.issues.papers.title,
+      date_issued: c.pages.issues.date_issued,
+      edition: c.pages.issues.edition,
+      page_sequence: c.pages.sequence,
+      image_url: c.pages.image_url,
+      resource_url: c.pages.image_url,
+      rrf_score: 0,
+    });
+  }
+
+  if (chunks.length === 0) return [];
+
+  // Rerank up to 200 chunks against the cleaned question
+  const searchQuery = cleanQueryForFts(question);
+  const candidates = chunks.slice(0, 200);
+  const rerankResults = await rerank(
+    searchQuery,
+    candidates.map((c) => c.content),
+    FINAL_TOP
+  );
+  return rerankResults.map((r) => ({
+    ...candidates[r.index],
+    rerank_score: r.relevance_score,
+  }));
+}
+
 export async function retrieve(
   question: string,
   options: {
