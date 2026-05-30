@@ -1,8 +1,14 @@
 import { getSupabase } from "@/lib/supabase";
 
-interface DateRow {
+interface NestedRow {
   chunk_id: string;
-  date_issued: string;
+  chunks: {
+    pages: {
+      issues: {
+        date_issued: string;
+      } | null;
+    } | null;
+  } | null;
 }
 
 export async function GET() {
@@ -17,20 +23,30 @@ export async function GET() {
     return Response.json({ error: "No active cluster run" }, { status: 404 });
   }
 
-  const all: DateRow[] = [];
+  const all: { chunkId: string; dateIssued: string }[] = [];
   const pageSize = 1000;
   let offset = 0;
 
   while (true) {
     const { data, error } = await supabase
-      .rpc("get_explore_dates", { active_run: activeRun.run_id })
+      .from("chunk_projections")
+      .select("chunk_id, chunks!inner(pages!inner(issues!inner(date_issued)))")
+      .eq("run_id", activeRun.run_id)
+      .order("chunk_id")
       .range(offset, offset + pageSize - 1);
 
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
     }
     if (!data || data.length === 0) break;
-    all.push(...data);
+
+    for (const row of data as unknown as NestedRow[]) {
+      const dateIssued = row.chunks?.pages?.issues?.date_issued;
+      if (dateIssued) {
+        all.push({ chunkId: row.chunk_id, dateIssued });
+      }
+    }
+
     if (data.length < pageSize) break;
     offset += pageSize;
   }
@@ -42,8 +58,8 @@ export async function GET() {
   let minDate = "9999-12-31";
   let maxDate = "0000-01-01";
   for (const row of all) {
-    if (row.date_issued < minDate) minDate = row.date_issued;
-    if (row.date_issued > maxDate) maxDate = row.date_issued;
+    if (row.dateIssued < minDate) minDate = row.dateIssued;
+    if (row.dateIssued > maxDate) maxDate = row.dateIssued;
   }
   const minDateObj = new Date(minDate);
   const maxOffset = Math.floor(
@@ -57,7 +73,7 @@ export async function GET() {
   view.setUint32(4, maxOffset, true);
 
   for (let i = 0; i < n; i++) {
-    const d = new Date(all[i].date_issued);
+    const d = new Date(all[i].dateIssued);
     const off = Math.floor((d.getTime() - minDateObj.getTime()) / (24 * 60 * 60 * 1000));
     view.setUint16(8 + i * 2, off, true);
   }
