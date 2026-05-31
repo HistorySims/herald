@@ -4,32 +4,34 @@ import { useEffect, useState } from "react";
 import type { Citation, AskResponse } from "@/lib/types";
 
 interface ClusterStoryProps {
-  chunkIds: string[];
-  question: string;
+  tier: number;
+  label: number;
   onClose: () => void;
 }
 
-export function ClusterStory({ chunkIds, question, onClose }: ClusterStoryProps) {
+export function ClusterStory({ tier, label, onClose }: ClusterStoryProps) {
   const [text, setText] = useState("");
   const [citations, setCitations] = useState<Citation[]>([]);
   const [streaming, setStreaming] = useState(true);
+  const [cacheHit, setCacheHit] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (chunkIds.length === 0) return;
     let cancelled = false;
 
     async function run() {
       try {
-        const resp = await fetch("/api/explore/ask", {
+        const resp = await fetch("/api/explore/cluster-story", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chunk_ids: chunkIds, question }),
+          body: JSON.stringify({ tier, label }),
         });
         if (!resp.ok) {
           const err = await resp.json();
           throw new Error(err.error || `HTTP ${resp.status}`);
         }
+        if (resp.headers.get("X-Cache") === "HIT") setCacheHit(true);
+
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("No body");
 
@@ -91,13 +93,18 @@ export function ClusterStory({ chunkIds, question, onClose }: ClusterStoryProps)
 
     run();
     return () => { cancelled = true; };
-  }, [chunkIds, question]);
+  }, [tier, label]);
 
   return (
     <div className="border-t border-stone-700 p-4">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-medium text-stone-400 uppercase tracking-wide">
+        <h3 className="text-xs font-medium text-stone-400 uppercase tracking-wide flex items-center gap-2">
           What&apos;s the Story?
+          {cacheHit && (
+            <span className="text-[9px] text-stone-500 font-normal normal-case">
+              (cached)
+            </span>
+          )}
         </h3>
         <button
           onClick={onClose}
@@ -113,7 +120,7 @@ export function ClusterStory({ chunkIds, question, onClose }: ClusterStoryProps)
 
       <div className="text-sm text-stone-300 leading-relaxed font-serif whitespace-pre-wrap">
         {text}
-        {streaming && (
+        {streaming && !cacheHit && (
           <span className="text-stone-500 animate-pulse">|</span>
         )}
       </div>

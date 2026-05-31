@@ -14,11 +14,7 @@ import {
   ChunkDetail as ChunkDetailType,
   ClusterInfo,
 } from "@/lib/explore-data";
-import {
-  computeBurstyTopics,
-  pickRepresentativeChunks,
-  BurstyTopic,
-} from "@/lib/burstiness";
+import { computeBurstyTopics, BurstyTopic } from "@/lib/burstiness";
 
 interface DatesData {
   offsets: Uint16Array;
@@ -46,17 +42,17 @@ export default function ExplorePage() {
   );
   const [loadingChunk, setLoadingChunk] = useState(false);
   const [focusedCluster, setFocusedCluster] = useState<number | null>(null);
-  const [storyChunkIds, setStoryChunkIds] = useState<string[] | null>(null);
+  const [storyCluster, setStoryCluster] = useState<{ tier: number; label: number } | null>(null);
   const [clusterInfo, setClusterInfo] = useState<Map<number, ClusterInfo>>(
     new Map()
   );
   const storyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (storyChunkIds && storyRef.current) {
+    if (storyCluster && storyRef.current) {
       storyRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-  }, [storyChunkIds]);
+  }, [storyCluster]);
 
   useEffect(() => {
     async function load() {
@@ -156,23 +152,13 @@ export default function ExplorePage() {
 
   const handleAskTopic = useCallback(
     (topic: BurstyTopic) => {
-      if (!points || !dates || !chunkIds) return;
-      const ids = pickRepresentativeChunks(
-        points,
-        dates.offsets,
-        chunkIds,
-        tier,
-        topic.cluster,
-        contentFilter,
-        12
-      );
-      if (ids.length > 0) setStoryChunkIds(ids);
+      setStoryCluster({ tier, label: topic.cluster });
     },
-    [points, dates, chunkIds, tier, contentFilter]
+    [tier]
   );
 
   const handleAskCurrentChunkCluster = useCallback(() => {
-    if (!points || !dates || !chunkIds || selectedIndex === null) return;
+    if (!points || selectedIndex === null) return;
     const clusterArr =
       tier === 0 ? points.clusterT0 :
       tier === 1 ? points.clusterT1 :
@@ -180,20 +166,9 @@ export default function ExplorePage() {
       points.clusterT3;
     const clusterLabel = clusterArr[selectedIndex];
     if (clusterLabel < 0) return;
-    const ids = pickRepresentativeChunks(
-      points,
-      dates.offsets,
-      chunkIds,
-      tier,
-      clusterLabel,
-      contentFilter,
-      12
-    );
-    if (ids.length > 0) {
-      setFocusedCluster(clusterLabel);
-      setStoryChunkIds(ids);
-    }
-  }, [points, dates, chunkIds, selectedIndex, tier, contentFilter]);
+    setFocusedCluster(clusterLabel);
+    setStoryCluster({ tier, label: clusterLabel });
+  }, [points, selectedIndex, tier]);
 
   const handleTopicClick = useCallback(
     (topic: BurstyTopic) => {
@@ -349,12 +324,12 @@ export default function ExplorePage() {
             />
           </div>
         )}
-        {storyChunkIds && (
+        {storyCluster && (
           <div ref={storyRef}>
             <ClusterStory
-              chunkIds={storyChunkIds}
-              question="What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages."
-              onClose={() => setStoryChunkIds(null)}
+              tier={storyCluster.tier}
+              label={storyCluster.label}
+              onClose={() => setStoryCluster(null)}
             />
           </div>
         )}
