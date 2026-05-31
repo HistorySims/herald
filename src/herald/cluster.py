@@ -70,9 +70,108 @@ Bad labels:
 Respond with ONLY the label. No preamble, no explanation."""
 
 
-LABEL_MIN_SIZE = 25
+LABEL_MIN_SIZE = 20
 LABEL_REP_CHUNKS = 5
-LABEL_MAX_CONCURRENT = 8
+LABEL_MAX_CONCURRENT = 4
+LABEL_MAX_RETRIES = 2
+
+
+def run_labels_only(
+    db_url: str,
+    on_progress: Callable[[str], None] | None = None,
+) -> int:
+    """Regenerate labels for the active cluster run without re-clustering.
+
+    Loads embeddings + chunk_projections from the active run,
+    re-derives cluster centroids and representative chunks, and
+    writes labels to clusters.label_text.
+
+    Returns the number of labels written.
+    """
+    def log(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set")
+
+    conn = psycopg.connect(db_url, autocommit=False, prepare_threshold=None)
+    register_vector(conn)
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT run_id FROM active_cluster_run WHERE singleton = true")
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("No active cluster run")
+            run_id = row[0] if isinstance(row[0], UUID) else UUID(str(row[0]))
+        conn.commit()
+        log(f"Using active run {run_id}")
+
+        log("Loading chunks + projections...")
+        chunk_data: list[tuple[UUID, list[float], str, int, int, int, int]] = []
+        with conn.cursor(name="load_for_labels") as cur:
+            cur.itersize = 5000
+            cur.execute(
+                """
+                SELECT cp.chunk_id, chunks.embedding, chunks.content,
+                       cp.cluster_t0, cp.cluster_t1, cp.cluster_t2, cp.cluster_t3
+                FROM chunk_projections cp
+                JOIN chunks ON chunks.id = cp.chunk_id
+                WHERE cp.run_id = %s
+                ORDER BY cp.chunk_id
+                """,
+                (run_id,),
+            )
+            for r in cur:
+                chunk_data.append(r)
+        conn.commit()
+        log(f"Loaded {len(chunk_data)} chunks")
+
+        if not chunk_data:
+            return 0
+
+        embeddings = np.array([r[1] for r in chunk_data], dtype=np.float32)
+        contents = [r[2] for r in chunk_data]
+        tier_labels = np.array(
+            [[r[3], r[4], r[5], r[6]] for r in chunk_data], dtype=np.int32
+        )
+
+        items: list[dict] = []
+        for tier in range(4):
+            labels_at_tier = tier_labels[:, tier]
+            unique_labels = sorted({int(l) for l in labels_at_tier if l >= 0})
+            for cluster_label in unique_labels:
+                member_indices = np.where(labels_at_tier == cluster_label)[0]
+                if len(member_indices) < LABEL_MIN_SIZE:
+                    continue
+                member_embeddings = embeddings[member_indices]
+                centroid = member_embeddings.mean(axis=0)
+                dists = np.linalg.norm(member_embeddings - centroid, axis=1)
+                top = np.argsort(dists)[:LABEL_REP_CHUNKS]
+                rep_contents = [contents[member_indices[i]][:400] for i in top]
+                items.append({"tier": tier, "label": cluster_label, "contents": rep_contents})
+
+        log(f"Labeling {len(items)} clusters (concurrent={LABEL_MAX_CONCURRENT})...")
+        results = asyncio.run(_label_clusters_async(api_key, items, log))
+
+        written = 0
+        with conn.transaction():
+            cur = conn.cursor()
+            for tier_idx, cluster_label, text in results:
+                if text is None:
+                    continue
+                cur.execute(
+                    "UPDATE clusters SET label_text = %s WHERE run_id = %s AND tier = %s AND label = %s",
+                    (text, run_id, tier_idx, cluster_label),
+                )
+                written += 1
+        log(f"Wrote {written} labels")
+        return written
+
+    finally:
+        conn.close()
 
 
 def run_pipeline(
@@ -222,36 +321,56 @@ async def _label_clusters_async(
     """Generate labels for clusters using Haiku. Returns [(tier, label, label_text), ...]."""
     import anthropic
 
-    client = anthropic.AsyncAnthropic(api_key=api_key)
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=60.0)
     semaphore = asyncio.Semaphore(LABEL_MAX_CONCURRENT)
     done_count = [0]
+    error_counts: dict[str, int] = defaultdict(int)
 
     async def label_one(item):
         async with semaphore:
             user_msg = "\n\n---\n\n".join(item["contents"])
-            try:
-                msg = await client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=40,
-                    temperature=0,
-                    system=LABEL_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user_msg}],
-                )
-                text = ""
-                for block in msg.content:
-                    if hasattr(block, "text"):
-                        text += block.text
-                label = text.strip().splitlines()[0].strip() if text.strip() else None
-                if label and len(label) > 120:
-                    label = label[:120]
-            except Exception:
-                label = None
+            label = None
+            for attempt in range(LABEL_MAX_RETRIES + 1):
+                try:
+                    msg = await client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=40,
+                        temperature=0,
+                        system=LABEL_SYSTEM_PROMPT,
+                        messages=[{"role": "user", "content": user_msg}],
+                    )
+                    text = ""
+                    for block in msg.content:
+                        if hasattr(block, "text"):
+                            text += block.text
+                    if text.strip():
+                        label = text.strip().splitlines()[0].strip()
+                        if label and len(label) > 120:
+                            label = label[:120]
+                    break
+                except anthropic.RateLimitError:
+                    if attempt < LABEL_MAX_RETRIES:
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    error_counts["rate_limit"] += 1
+                    break
+                except anthropic.APIError as e:
+                    error_counts[f"api_{type(e).__name__}"] += 1
+                    break
+                except Exception as e:
+                    error_counts[type(e).__name__] += 1
+                    break
             done_count[0] += 1
             if done_count[0] % 20 == 0:
                 log(f"    labeled {done_count[0]}/{len(items)}")
             return (item["tier"], item["label"], label)
 
-    return await asyncio.gather(*[label_one(it) for it in items])
+    results = await asyncio.gather(*[label_one(it) for it in items])
+    success = sum(1 for _, _, lbl in results if lbl is not None)
+    log(f"    label results: {success} succeeded, {len(results) - success} failed")
+    if error_counts:
+        log(f"    errors: {dict(error_counts)}")
+    return results
 
 
 def _build_label_items(

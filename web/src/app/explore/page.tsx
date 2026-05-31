@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { ExploreMap } from "@/components/ExploreMap";
 import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
@@ -36,9 +36,9 @@ export default function ExplorePage() {
   const [error, setError] = useState<string | null>(null);
   const [tier, setTier] = useState(2);
   const [contentFilter, setContentFilter] = useState<Set<number>>(
-    new Set([0, 1, 2, 3])
+    new Set([0])
   );
-  const [showOutliers, setShowOutliers] = useState(true);
+  const [showOutliers, setShowOutliers] = useState(false);
   const [dateRange, setDateRange] = useState<[number, number] | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<ChunkDetailType | null>(
@@ -50,6 +50,13 @@ export default function ExplorePage() {
   const [clusterInfo, setClusterInfo] = useState<Map<number, ClusterInfo>>(
     new Map()
   );
+  const storyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (storyChunkIds && storyRef.current) {
+      storyRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [storyChunkIds]);
 
   useEffect(() => {
     async function load() {
@@ -164,12 +171,29 @@ export default function ExplorePage() {
     [points, dates, chunkIds, tier, contentFilter]
   );
 
-  const handleSearchTopic = useCallback(
-    (topic: BurstyTopic) => {
-      window.location.href = `/?scope_tier=${tier}&scope_label=${topic.cluster}`;
-    },
-    [tier]
-  );
+  const handleAskCurrentChunkCluster = useCallback(() => {
+    if (!points || !dates || !chunkIds || selectedIndex === null) return;
+    const clusterArr =
+      tier === 0 ? points.clusterT0 :
+      tier === 1 ? points.clusterT1 :
+      tier === 2 ? points.clusterT2 :
+      points.clusterT3;
+    const clusterLabel = clusterArr[selectedIndex];
+    if (clusterLabel < 0) return;
+    const ids = pickRepresentativeChunks(
+      points,
+      dates.offsets,
+      chunkIds,
+      tier,
+      clusterLabel,
+      contentFilter,
+      12
+    );
+    if (ids.length > 0) {
+      setFocusedCluster(clusterLabel);
+      setStoryChunkIds(ids);
+    }
+  }, [points, dates, chunkIds, selectedIndex, tier, contentFilter]);
 
   const handleTopicClick = useCallback(
     (topic: BurstyTopic) => {
@@ -322,21 +346,30 @@ export default function ExplorePage() {
               }
               onTopicClick={handleTopicClick}
               onAskClick={handleAskTopic}
-              onSearchClick={handleSearchTopic}
             />
           </div>
         )}
         {storyChunkIds && (
-          <ClusterStory
-            chunkIds={storyChunkIds}
-            question="What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages."
-            onClose={() => setStoryChunkIds(null)}
-          />
+          <div ref={storyRef}>
+            <ClusterStory
+              chunkIds={storyChunkIds}
+              question="What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages."
+              onClose={() => setStoryChunkIds(null)}
+            />
+          </div>
         )}
         {(selectedChunk || loadingChunk) && (
           <ChunkDetail
             chunk={selectedChunk}
             loading={loadingChunk}
+            tier={tier}
+            clusterLabel={
+              selectedChunk && selectedChunk.cluster_labels.length > tier
+                ? clusterInfo.get(selectedChunk.cluster_labels[tier])
+                    ?.label_text ?? null
+                : null
+            }
+            onAskClusterStory={handleAskCurrentChunkCluster}
             onClose={() => {
               setSelectedChunk(null);
               setSelectedIndex(null);

@@ -118,15 +118,10 @@ export function ExploreMap({
     [points, tier, filteredIndices, clusterArrayForTier, handleClick]
   );
 
-  const matesLineColor = useMemo<[number, number, number, number]>(() => {
-    if (focusedCluster !== null && focusedCluster >= 0) {
-      const [r, g, b] = clusterColor(focusedCluster);
-      return [r, g, b, 255];
-    }
-    return [255, 255, 255, 110];
-  }, [focusedCluster]);
+  const matesLineColor: [number, number, number, number] =
+    focusedCluster !== null ? [255, 255, 255, 220] : [255, 255, 255, 110];
 
-  const matesLineWidth = focusedCluster !== null ? 1 : 0.5;
+  const matesLineWidth = focusedCluster !== null ? 1.2 : 0.5;
   const matesRadius = focusedCluster !== null ? 2 : 1.6;
 
   const clusterMatesLayer = useMemo(

@@ -10,7 +10,6 @@ interface BurstyTopicsProps {
   clusterLabels?: Map<number, string | null>;
   onTopicClick: (topic: BurstyTopic) => void;
   onAskClick: (topic: BurstyTopic) => void;
-  onSearchClick: (topic: BurstyTopic) => void;
 }
 
 function offsetToShortDate(minDate: string, offset: number): string {
@@ -29,7 +28,6 @@ export function BurstyTopics({
   clusterLabels,
   onTopicClick,
   onAskClick,
-  onSearchClick,
 }: BurstyTopicsProps) {
   if (topics.length === 0) return null;
 
@@ -80,20 +78,12 @@ export function BurstyTopics({
                 </span>
               </button>
               {isFocused && (
-                <div className="border-t border-stone-800">
-                  <button
-                    onClick={() => onAskClick(t)}
-                    className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300"
-                  >
-                    → What&apos;s this story?
-                  </button>
-                  <button
-                    onClick={() => onSearchClick(t)}
-                    className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300 border-t border-stone-800"
-                  >
-                    → Search within this cluster
-                  </button>
-                </div>
+                <button
+                  onClick={() => onAskClick(t)}
+                  className="w-full text-left px-2 py-1 text-xs text-amber-400 hover:text-amber-300 border-t border-stone-800"
+                >
+                  → What&apos;s this story?
+                </button>
               )}
             </div>
           );

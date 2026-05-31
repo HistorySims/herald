@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 
 from herald import db, normalize, settings
-from herald.cluster import ClusterParams, run_pipeline
+from herald.cluster import ClusterParams, run_labels_only, run_pipeline
 from herald.embed import VoyageEmbedder
 from herald.eval import (
     EVAL_QUESTIONS,
@@ -449,6 +449,37 @@ def cluster(
     from herald.classify import LABELS
     for t, count in sorted(result.content_type_counts.items()):
         console.print(f"  {LABELS.get(t, f'type_{t}')}: {count}")
+
+
+@app.command()
+def relabel() -> None:
+    """Regenerate Haiku cluster labels for the active cluster run.
+
+    Skips clustering entirely — just reads the existing run and
+    writes labels to clusters.label_text. Useful when labels failed
+    previously (e.g. missing column) or you tweaked the prompt.
+    """
+    cfg = settings.load()
+    if not cfg.supabase_db_url:
+        raise typer.BadParameter("SUPABASE_DB_URL is not set.")
+    if not cfg.anthropic_api_key:
+        raise typer.BadParameter("ANTHROPIC_API_KEY is not set.")
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Relabeling...", total=None)
+
+        def on_progress(msg: str) -> None:
+            progress.update(task, description=msg)
+
+        written = run_labels_only(cfg.supabase_db_url, on_progress)
+
+    console.print(f"\n[bold green]Relabel complete[/bold green]: {written} labels written")
 
 
 @app.command()

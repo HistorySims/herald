@@ -6,10 +6,26 @@ import { contentTypeLabel } from "@/lib/explore-data";
 interface ChunkDetailProps {
   chunk: ChunkDetailType | null;
   loading: boolean;
+  tier: number;
+  clusterLabel?: string | null;
+  onAskClusterStory?: () => void;
   onClose: () => void;
 }
 
-export function ChunkDetail({ chunk, loading, onClose }: ChunkDetailProps) {
+export function ChunkDetail({
+  chunk,
+  loading,
+  tier,
+  clusterLabel,
+  onAskClusterStory,
+  onClose,
+}: ChunkDetailProps) {
+  const clusterAtTier =
+    chunk?.cluster_labels && chunk.cluster_labels.length > tier
+      ? chunk.cluster_labels[tier]
+      : null;
+  const isOutlier = clusterAtTier !== null && clusterAtTier < 0;
+
   return (
     <div className="border-t border-stone-700 p-4">
       <div className="flex items-center justify-between mb-2">
@@ -41,20 +57,35 @@ export function ChunkDetail({ chunk, loading, onClose }: ChunkDetailProps) {
               {chunk.date_issued} &middot; p.{chunk.page_sequence} &middot;{" "}
               {contentTypeLabel(chunk.content_type)}
             </p>
+            {clusterLabel && (
+              <p className="text-xs text-stone-300 mt-1">
+                Cluster: <span className="text-stone-200">{clusterLabel}</span>
+              </p>
+            )}
           </div>
 
           <p className="text-sm text-stone-300 leading-relaxed font-serif">
             {chunk.content}
           </p>
 
-          <a
-            href={chunk.image_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block text-xs text-amber-500 hover:text-amber-400 underline"
-          >
-            View original page
-          </a>
+          <div className="flex flex-col gap-1">
+            {onAskClusterStory && !isOutlier && (
+              <button
+                onClick={onAskClusterStory}
+                className="text-xs text-amber-400 hover:text-amber-300 text-left"
+              >
+                → What&apos;s this cluster&apos;s story?
+              </button>
+            )}
+            <a
+              href={chunk.image_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-amber-400 hover:text-amber-300"
+            >
+              → View original page
+            </a>
+          </div>
         </div>
       )}
     </div>
