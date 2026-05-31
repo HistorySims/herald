@@ -31,6 +31,11 @@ on:
         required: false
         type: boolean
         default: false
+      sample_days:
+        description: "Sparse mode: comma-separated days-of-month (e.g. '1,15'). Empty = full range."
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   # Prevent two ingests touching the same paper from racing.
@@ -65,11 +70,13 @@ jobs:
               --lccn "${{ inputs.lccn }}" \
               --from "${{ inputs.date_from }}" \
               --to   "${{ inputs.date_to }}" \
+              --sample-days "${{ inputs.sample_days }}" \
               --dry-run
           else
             uv run herald ingest \
               --lccn "${{ inputs.lccn }}" \
               --from "${{ inputs.date_from }}" \
               --to   "${{ inputs.date_to }}" \
+              --sample-days "${{ inputs.sample_days }}" \
               --no-dry-run
           fi

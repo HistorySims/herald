@@ -46,15 +46,89 @@ def ingest(
         "--dry-run/--no-dry-run",
         help="Dry-run enumerates issues only. --no-dry-run writes to Supabase.",
     ),
+    sample_days: str = typer.Option(
+        "",
+        "--sample-days",
+        help="Comma-separated days-of-month to sample (e.g. '1,15'). Empty = full range.",
+    ),
 ) -> None:
-    """Ingest a paper from Chronicling America into Supabase."""
+    """Ingest a paper from Chronicling America into Supabase.
+
+    With --sample-days, only specific days of each month are ingested
+    (e.g. '1,15' picks the 1st and 15th). This is the cheap-and-wide
+    strategy: get sparse coverage across many years without ingesting
+    every issue.
+    """
     cfg = settings.load()
-    asyncio.run(_ingest(cfg, lccn, _parse_date(date_from), _parse_date(date_to), dry_run))
+    df = _parse_date(date_from)
+    dt = _parse_date(date_to)
+    days = _parse_sample_days(sample_days)
+    asyncio.run(_ingest(cfg, lccn, df, dt, dry_run, days))
+
+
+def _parse_sample_days(s: str) -> list[int]:
+    s = s.strip()
+    if not s:
+        return []
+    out: list[int] = []
+    for piece in s.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            day = int(piece)
+        except ValueError as e:
+            raise typer.BadParameter(f"sample-days must be integers: {piece}") from e
+        if not 1 <= day <= 31:
+            raise typer.BadParameter(f"sample-days must be 1-31: {day}")
+        out.append(day)
+    return sorted(set(out))
+
+
+def _expand_sample_dates(df: date, dt: date, days: list[int]) -> list[date]:
+    """Generate sampled dates: for each month in [df, dt], pick the given days."""
+    if not days:
+        return []
+    from calendar import monthrange
+    dates: list[date] = []
+    year, month = df.year, df.month
+    while (year, month) <= (dt.year, dt.month):
+        last_day_of_month = monthrange(year, month)[1]
+        for d in days:
+            if d > last_day_of_month:
+                continue
+            candidate = date(year, month, d)
+            if df <= candidate <= dt:
+                dates.append(candidate)
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return dates
 
 
 async def _ingest(
-    cfg: settings.Settings, lccn: str, df: date, dt: date, dry_run: bool
+    cfg: settings.Settings,
+    lccn: str,
+    df: date,
+    dt: date,
+    dry_run: bool,
+    sample_days: list[int],
 ) -> None:
+    if sample_days:
+        sample_dates = _expand_sample_dates(df, dt, sample_days)
+        console.print(
+            f"[bold]Sparse ingest:[/bold] {len(sample_dates)} dates "
+            f"(days {sample_days} per month, {df} → {dt})"
+        )
+        for d in sample_dates:
+            console.print(f"\n[bold cyan]→ {d}[/bold cyan]")
+            if dry_run:
+                await _ingest_dry_run(cfg, lccn, d, d)
+            else:
+                await _ingest_full(cfg, lccn, d, d)
+        return
+
     if dry_run:
         await _ingest_dry_run(cfg, lccn, df, dt)
         return

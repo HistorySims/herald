@@ -51,27 +51,34 @@ class ClusterResult:
     labels_generated: int = 0
 
 
-LABEL_SYSTEM_PROMPT = """You will be given several short passages from 1840s New York newspapers that share semantic similarity. Identify their shared topic in 3 to 8 words. Be specific about people, places, or events. Avoid prefixes like "newspaper articles about" or "passages discussing" — just name the topic directly.
+LABEL_SYSTEM_PROMPT = """You will be given several short passages from 1840s New York newspapers grouped by semantic similarity into a single cluster. The passages are weighted samples — the most numerous sub-topics in this cluster contribute more passages, so the dominant theme should be obvious.
 
-Good labels:
-- Anti-Rent disturbances in Hudson Valley
-- Sheriff Steele killing, August 1845
-- Texas annexation debate
-- Shipping arrivals at New York port
-- Mexican-American border tensions
-- Police court arrests and assaults
-- Stock prices and bank notices
+Your job: identify the cluster's shared theme in 3 to 10 words.
 
-Bad labels:
-- Newspaper articles about various topics
-- Multiple events happening in 1845
-- Articles discussing politics
+If the passages tightly converge on one event or topic (typical of small, fine-grained clusters): be specific. Name people, places, dates, events.
+- "Sheriff Steele killing in Andes, August 1845"
+- "Smith Boughton arrest and trial"
+- "Texas annexation Senate debate"
+- "Shipping arrivals at port of New York"
 
-Respond with ONLY the label. No preamble, no explanation."""
+If passages span several related sub-topics (typical of broader clusters that merged many fine clusters): name the umbrella theme that connects them.
+- "Anti-Rent movement and Hudson Valley tenant unrest"
+- "U.S.-Mexican border tensions and Texas annexation"
+- "Politics, elections, and party conventions"
+- "Crime, courts, and police-court arrests"
+
+Forbidden:
+- Generic catch-all phrases: "various 1840s topics", "newspaper articles about politics"
+- Meta language: "passages discussing", "articles about", "coverage of"
+- Just say the topic.
+
+If the passages are genuinely incoherent — garbled OCR, no recoverable theme — reply with exactly: SKIP
+
+Respond with ONLY the label or SKIP."""
 
 
 LABEL_MIN_SIZE = 20
-LABEL_REP_CHUNKS = 5
+LABEL_REP_CHUNKS_BY_TIER = {0: 5, 1: 8, 2: 12, 3: 15}
 LABEL_MAX_CONCURRENT = 4
 LABEL_MAX_RETRIES = 2
 
@@ -157,20 +164,38 @@ def run_labels_only(
             [[r[3], r[4], r[5], r[6]] for r in chunk_data], dtype=np.int32
         )
 
-        items: list[dict] = []
-        for tier in range(4):
-            labels_at_tier = tier_labels[:, tier]
-            unique_labels = sorted({int(l) for l in labels_at_tier if l >= 0})
-            for cluster_label in unique_labels:
-                member_indices = np.where(labels_at_tier == cluster_label)[0]
-                if len(member_indices) < LABEL_MIN_SIZE:
-                    continue
-                member_embeddings = embeddings[member_indices]
-                centroid = member_embeddings.mean(axis=0)
-                dists = np.linalg.norm(member_embeddings - centroid, axis=1)
-                top = np.argsort(dists)[:LABEL_REP_CHUNKS]
-                rep_contents = [contents[member_indices[i]][:400] for i in top]
-                items.append({"tier": tier, "label": cluster_label, "contents": rep_contents})
+        # Reconstruct t0 centroids, sizes, and hierarchy so we can reuse
+        # the same weighted-sampling logic as run_pipeline.
+        t0_array = tier_labels[:, 0]
+        n_t0 = int(t0_array.max()) + 1 if t0_array.max() >= 0 else 0
+        if n_t0 == 0:
+            log("No tier-0 clusters in active run; nothing to label")
+            return 0
+
+        t0_centroids = np.zeros((n_t0, embeddings.shape[1]), dtype=np.float32)
+        t0_sizes = np.zeros(n_t0, dtype=np.int64)
+        for lab in range(n_t0):
+            mask = t0_array == lab
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            t0_centroids[lab] = embeddings[mask].mean(axis=0)
+            t0_sizes[lab] = count
+
+        hierarchy: dict[int, dict[int, int]] = {1: {}, 2: {}, 3: {}}
+        for chunk_row in range(len(chunk_data)):
+            t0 = int(tier_labels[chunk_row, 0])
+            if t0 < 0:
+                continue
+            for tier in (1, 2, 3):
+                upper = int(tier_labels[chunk_row, tier])
+                if upper >= 0:
+                    hierarchy[tier][t0] = upper
+
+        items = _build_label_items(
+            t0_array, contents, embeddings,
+            t0_centroids, t0_sizes, hierarchy,
+        )
 
         log(f"Labeling {len(items)} clusters (concurrent={LABEL_MAX_CONCURRENT})...")
         results = asyncio.run(_label_clusters_async(api_key, items, log))
@@ -364,7 +389,10 @@ async def _label_clusters_async(
                             text += block.text
                     if text.strip():
                         label = text.strip().splitlines()[0].strip()
-                        if label and _is_refusal(label):
+                        if label and label.upper().strip(".") == "SKIP":
+                            error_counts["skipped"] += 1
+                            label = None
+                        elif label and _is_refusal(label):
                             error_counts["refused"] += 1
                             label = None
                         if label and len(label) > 120:
@@ -395,6 +423,21 @@ async def _label_clusters_async(
     return results
 
 
+def _pick_top_closest(
+    member_indices: list[int],
+    embeddings: np.ndarray,
+    centroid: np.ndarray,
+    n: int,
+) -> list[int]:
+    if n <= 0 or not member_indices:
+        return []
+    member_arr = np.array(member_indices)
+    member_emb = embeddings[member_arr]
+    dists = np.linalg.norm(member_emb - centroid, axis=1)
+    top = np.argsort(dists)[:n]
+    return [int(member_arr[i]) for i in top]
+
+
 def _build_label_items(
     t0_labels: np.ndarray,
     contents: list[str],
@@ -403,47 +446,68 @@ def _build_label_items(
     t0_sizes: np.ndarray,
     hierarchy: dict[int, dict[int, int]],
 ) -> list[dict]:
-    """For each cluster (tier 0-3, size >= LABEL_MIN_SIZE), pick representative chunks."""
+    """For each cluster, pick representative chunks (weighted by sub-cluster size at higher tiers)."""
     items: list[dict] = []
 
-    # Per-cluster member indices for tier 0
     t0_members: dict[int, list[int]] = defaultdict(list)
     for i in range(len(t0_labels)):
         lab = int(t0_labels[i])
         if lab >= 0:
             t0_members[lab].append(i)
 
-    # Tier 0: for each cluster, pick chunks closest to its centroid
+    # Tier 0: closest-to-centroid (each cluster is one tight topic)
+    rep_count_0 = LABEL_REP_CHUNKS_BY_TIER[0]
     for t0_lab, members in t0_members.items():
         if t0_sizes[t0_lab] < LABEL_MIN_SIZE:
             continue
-        member_indices = np.array(members)
-        member_embeddings = embeddings[member_indices]
-        centroid = t0_centroids[t0_lab]
-        dists = np.linalg.norm(member_embeddings - centroid, axis=1)
-        top = np.argsort(dists)[:LABEL_REP_CHUNKS]
-        rep_indices = member_indices[top]
-        rep_contents = [contents[i][:400] for i in rep_indices]
+        picked = _pick_top_closest(members, embeddings, t0_centroids[t0_lab], rep_count_0)
+        rep_contents = [contents[i][:400] for i in picked]
         items.append({"tier": 0, "label": t0_lab, "contents": rep_contents})
 
-    # Higher tiers: group t0 clusters by their tier-N label, then pick top chunks
+    # Higher tiers: pick chunks PROPORTIONALLY from sub-clusters by their size.
+    # This preserves the NYC/Syracuse/Buffalo weighting: a sub-cluster with 1000
+    # chunks contributes far more rep chunks than one with 30, so the dominant
+    # theme drowns out fringe sub-topics in the prompt.
     for tier in [1, 2, 3]:
         mapping = hierarchy.get(tier, {})
-        per_upper: dict[int, list[int]] = defaultdict(list)
+        sub_by_upper: dict[int, list[int]] = defaultdict(list)
         for t0_lab, upper_lab in mapping.items():
-            per_upper[upper_lab].extend(t0_members.get(t0_lab, []))
+            sub_by_upper[upper_lab].append(t0_lab)
 
-        for upper_lab, members in per_upper.items():
-            if len(members) < LABEL_MIN_SIZE:
+        rep_total = LABEL_REP_CHUNKS_BY_TIER[tier]
+
+        for upper_lab, sub_t0_labs in sub_by_upper.items():
+            total_size = sum(int(t0_sizes[t0]) for t0 in sub_t0_labs)
+            if total_size < LABEL_MIN_SIZE:
                 continue
-            member_indices = np.array(members)
-            member_embeddings = embeddings[member_indices]
-            # Weighted centroid for this tier (we can recompute from members directly)
-            centroid = member_embeddings.mean(axis=0)
-            dists = np.linalg.norm(member_embeddings - centroid, axis=1)
-            top = np.argsort(dists)[:LABEL_REP_CHUNKS]
-            rep_indices = member_indices[top]
-            rep_contents = [contents[i][:400] for i in rep_indices]
+
+            sub_t0_labs.sort(key=lambda t0: -int(t0_sizes[t0]))
+
+            picked: list[int] = []
+            remaining = rep_total
+            for idx, t0_lab in enumerate(sub_t0_labs):
+                if remaining <= 0:
+                    break
+                size = int(t0_sizes[t0_lab])
+                share = max(
+                    1 if idx < 3 else 0,
+                    round(rep_total * size / total_size),
+                )
+                share = min(share, remaining)
+                if share <= 0:
+                    continue
+                picked_here = _pick_top_closest(
+                    t0_members.get(t0_lab, []),
+                    embeddings,
+                    t0_centroids[t0_lab],
+                    share,
+                )
+                picked.extend(picked_here)
+                remaining -= len(picked_here)
+
+            if not picked:
+                continue
+            rep_contents = [contents[i][:400] for i in picked]
             items.append({"tier": tier, "label": upper_lab, "contents": rep_contents})
 
     return items
