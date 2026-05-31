@@ -425,7 +425,7 @@ class LOCClient:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if resp.status_code == 429 or resp.status_code >= 500:
+            if resp.status_code == 429 or resp.status_code == 403 or resp.status_code >= 500:
                 last = httpx.HTTPStatusError(
                     f"loc {resp.status_code}", request=resp.request, response=resp,
                 )
@@ -436,10 +436,14 @@ class LOCClient:
                     # Honor LOC's hint, with a 1s floor.
                     await asyncio.sleep(max(int(ra), 1))
                 else:
-                    # 429 means "really back off" — pad significantly more
+                    # 429/403 mean "really back off" — pad significantly more
                     # than for 5xx. The cool-off lets LOC's per-minute
                     # window roll over.
-                    pad = self._rate_limit_pad if resp.status_code == 429 else 0.0
+                    pad = (
+                        self._rate_limit_pad
+                        if resp.status_code in (429, 403)
+                        else 0.0
+                    )
                     await asyncio.sleep(delay + pad)
                     delay *= 2
                 continue
