@@ -17,6 +17,7 @@ interface ExploreMapProps {
   selectedIndex: number | null;
   selectedLabel: string | null;
   focusedCluster: number | null;
+  searchMatches: Set<number> | null;
   onPointClick: (index: number) => void;
 }
 
@@ -37,6 +38,7 @@ export function ExploreMap({
   selectedIndex,
   selectedLabel,
   focusedCluster,
+  searchMatches,
   onPointClick,
 }: ExploreMapProps) {
   const clusterArrayForTier = useMemo(() => {
@@ -154,6 +156,40 @@ export function ExploreMap({
     [points, clusterMateIndices, matesLineColor, matesLineWidth, matesRadius]
   );
 
+  const searchMatchIndices = useMemo(() => {
+    if (!searchMatches || searchMatches.size === 0) return [];
+    const arr: number[] = [];
+    for (const i of filteredIndices) {
+      if (searchMatches.has(i)) arr.push(i);
+    }
+    return arr;
+  }, [searchMatches, filteredIndices]);
+
+  const searchLayer = useMemo(
+    () =>
+      new ScatterplotLayer({
+        id: "search-matches",
+        data: { length: searchMatchIndices.length },
+        getPosition: (_: unknown, { index }: { index: number }) => {
+          const i = searchMatchIndices[index];
+          return [points.x[i], points.y[i], 0];
+        },
+        getFillColor: [0, 0, 0, 0],
+        getLineColor: [255, 215, 0, 240],
+        getRadius: 2.2,
+        getLineWidth: 1.5,
+        stroked: true,
+        filled: false,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 12,
+        lineWidthMinPixels: 1.5,
+        lineWidthMaxPixels: 2.5,
+        pickable: false,
+        updateTriggers: { getPosition: [searchMatchIndices] },
+      }),
+    [points, searchMatchIndices]
+  );
+
   const highlightData = useMemo(() => {
     if (selectedIndex === null) return [];
     return [{
@@ -215,7 +251,7 @@ export function ExploreMap({
       views={views}
       initialViewState={INITIAL_VIEW_STATE}
       controller={true}
-      layers={[dotLayer, clusterMatesLayer, selectedRingLayer, labelLayer]}
+      layers={[dotLayer, clusterMatesLayer, searchLayer, selectedRingLayer, labelLayer]}
       style={{ position: "absolute", inset: "0" }}
       getCursor={({ isDragging, isHovering }) =>
         isDragging ? "grabbing" : isHovering ? "pointer" : "grab"

@@ -75,6 +75,25 @@ LABEL_REP_CHUNKS = 5
 LABEL_MAX_CONCURRENT = 4
 LABEL_MAX_RETRIES = 2
 
+import re as _re
+
+_LABEL_REFUSAL_PATTERNS = [
+    _re.compile(r"^i cannot\b", _re.IGNORECASE),
+    _re.compile(r"^i'?m unable\b", _re.IGNORECASE),
+    _re.compile(r"^unable to\b", _re.IGNORECASE),
+    _re.compile(r"^the passages\b.*\b(do not|don't)\b", _re.IGNORECASE),
+    _re.compile(r"\bocr[- ]?(damaged|corrupted|errors?)\b", _re.IGNORECASE),
+    _re.compile(r"\bseverely corrupted\b", _re.IGNORECASE),
+    _re.compile(r"\bcannot reliably\b", _re.IGNORECASE),
+    _re.compile(r"\bunintelligible\b", _re.IGNORECASE),
+    _re.compile(r"\bno (clear|shared|coherent)\b", _re.IGNORECASE),
+    _re.compile(r"^unclear\b", _re.IGNORECASE),
+]
+
+
+def _is_refusal(label: str) -> bool:
+    return any(p.search(label) for p in _LABEL_REFUSAL_PATTERNS)
+
 
 def run_labels_only(
     db_url: str,
@@ -345,6 +364,9 @@ async def _label_clusters_async(
                             text += block.text
                     if text.strip():
                         label = text.strip().splitlines()[0].strip()
+                        if label and _is_refusal(label):
+                            error_counts["refused"] += 1
+                            label = None
                         if label and len(label) > 120:
                             label = label[:120]
                     break

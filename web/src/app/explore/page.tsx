@@ -7,6 +7,7 @@ import { ChunkDetail } from "@/components/ChunkDetail";
 import { TimeFilter } from "@/components/TimeFilter";
 import { BurstyTopics } from "@/components/BurstyTopics";
 import { ClusterStory } from "@/components/ClusterStory";
+import { SearchBox } from "@/components/SearchBox";
 import {
   ExplorePoints,
   parsePointsBinary,
@@ -46,6 +47,8 @@ export default function ExplorePage() {
   const [clusterInfo, setClusterInfo] = useState<Map<number, ClusterInfo>>(
     new Map()
   );
+  const [searchMatches, setSearchMatches] = useState<Set<number> | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
   const storyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -149,6 +152,36 @@ export default function ExplorePage() {
       8
     );
   }, [points, dates, tier, contentFilter]);
+
+  const handleSearch = useCallback(
+    async (q: string) => {
+      if (!chunkIds) return;
+      setSearchLoading(true);
+      try {
+        const resp = await fetch(`/api/explore/search?q=${encodeURIComponent(q)}`);
+        if (!resp.ok) {
+          setSearchMatches(new Set());
+          return;
+        }
+        const data = (await resp.json()) as { chunk_ids: string[] };
+        const matchSet = new Set(data.chunk_ids);
+        const indices = new Set<number>();
+        for (let i = 0; i < chunkIds.length; i++) {
+          if (matchSet.has(chunkIds[i])) indices.add(i);
+        }
+        setSearchMatches(indices);
+      } catch {
+        setSearchMatches(new Set());
+      } finally {
+        setSearchLoading(false);
+      }
+    },
+    [chunkIds]
+  );
+
+  const handleClearSearch = useCallback(() => {
+    setSearchMatches(null);
+  }, []);
 
   const handleAskTopic = useCallback(
     (topic: BurstyTopic) => {
@@ -262,6 +295,7 @@ export default function ExplorePage() {
           selectedIndex={selectedIndex}
           selectedLabel={selectedLabel}
           focusedCluster={focusedCluster}
+          searchMatches={searchMatches}
           onPointClick={handlePointClick}
         />
         <div className="absolute top-3 left-3">
@@ -305,6 +339,14 @@ export default function ExplorePage() {
             />
           </div>
         )}
+        <div className="px-4 pb-4">
+          <SearchBox
+            matchCount={searchMatches?.size ?? null}
+            loading={searchLoading}
+            onSearch={handleSearch}
+            onClear={handleClearSearch}
+          />
+        </div>
         {dates && burstyTopics.length > 0 && (
           <div className="px-4 pb-4">
             <BurstyTopics
