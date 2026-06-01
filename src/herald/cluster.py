@@ -79,7 +79,8 @@ Respond with ONLY the label or SKIP."""
 
 LABEL_MIN_SIZE = 20
 LABEL_REP_CHUNKS_BY_TIER = {0: 5, 1: 8, 2: 12, 3: 15}
-LABEL_MAX_CONCURRENT = 4
+LABEL_MAX_CONCURRENT = 1
+LABEL_MIN_INTERVAL_SECS = 1.3
 LABEL_MAX_RETRIES = 2
 
 import re as _re
@@ -369,9 +370,21 @@ async def _label_clusters_async(
     semaphore = asyncio.Semaphore(LABEL_MAX_CONCURRENT)
     done_count = [0]
     error_counts: dict[str, int] = defaultdict(int)
+    last_call_at = [0.0]  # mutable wall-clock of last issued call (monotonic seconds)
+    pace_lock = asyncio.Lock()
+
+    async def _pace() -> None:
+        async with pace_lock:
+            import time as _time
+            now = _time.monotonic()
+            gap = now - last_call_at[0]
+            if gap < LABEL_MIN_INTERVAL_SECS:
+                await asyncio.sleep(LABEL_MIN_INTERVAL_SECS - gap)
+            last_call_at[0] = _time.monotonic()
 
     async def label_one(item):
         async with semaphore:
+            await _pace()
             user_msg = "\n\n---\n\n".join(item["contents"])
             label = None
             for attempt in range(LABEL_MAX_RETRIES + 1):
@@ -400,7 +413,9 @@ async def _label_clusters_async(
                     break
                 except anthropic.RateLimitError:
                     if attempt < LABEL_MAX_RETRIES:
-                        await asyncio.sleep(2 * (attempt + 1))
+                        # 60s minimum on rate-limit retry: Anthropic's RPM window
+                        # is per-minute, so anything shorter just hits again.
+                        await asyncio.sleep(60 * (attempt + 1))
                         continue
                     error_counts["rate_limit"] += 1
                     break
