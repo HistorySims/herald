@@ -12,6 +12,26 @@ const ZOOM_LEVELS = [1, 1.5, 2, 3, 4];
 const DISCOVERY_TIMEOUT_MS = 8000;
 const IMAGE_TIMEOUT_MS = 30000;
 
+function deriveLocPageUrl(imageUrl: string): string {
+  // Legacy: https://chroniclingamerica.loc.gov/lccn/X/D/ed-N/seq-N.jpg
+  const legacy = imageUrl.match(
+    /^https:\/\/chroniclingamerica\.loc\.gov\/lccn\/([^/]+)\/([^/]+)\/(ed-\d+)\/(seq-\d+)\.(?:jpg|jp2|pdf)$/
+  );
+  if (legacy) {
+    return `https://www.loc.gov/resource/${legacy[1]}/${legacy[2]}/${legacy[3]}/${legacy[4]}/`;
+  }
+  return imageUrl;
+}
+
+function bestLinkUrl(
+  resourceUrl: string | null,
+  imageUrl: string | null
+): string {
+  if (resourceUrl && resourceUrl.trim()) return resourceUrl;
+  if (imageUrl) return deriveLocPageUrl(imageUrl);
+  return "https://www.loc.gov/";
+}
+
 interface LocResourceFile {
   url?: string;
   mimetype?: string;
@@ -89,9 +109,11 @@ export function PageViewer({
     );
 
     const runDiscovery = async (): Promise<string | null> => {
-      if (!resourceUrl) return null;
+      const discoveryUrl = resourceUrl && resourceUrl.trim()
+        ? resourceUrl
+        : deriveLocPageUrl(imageUrl);
       try {
-        const resp = await fetch(`${resourceUrl}?fo=json`, {
+        const resp = await fetch(`${discoveryUrl}?fo=json`, {
           signal: controller.signal,
           credentials: "omit",
           headers: { Accept: "application/json" },
@@ -170,16 +192,15 @@ export function PageViewer({
               <div className="flex flex-col items-center gap-3 text-stone-400 text-sm">
                 <span className="inline-block w-5 h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
                 Loading page...
-                {resourceUrl && (
-                  <a
-                    href={resourceUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-amber-500 hover:text-amber-400 text-xs underline pointer-events-auto mt-2"
-                  >
-                    Or open on LOC directly
-                  </a>
-                )}
+                <a
+                  href={bestLinkUrl(resourceUrl, imageUrl)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-amber-500 hover:text-amber-400 text-xs underline pointer-events-auto mt-2"
+                >
+                  Or open on LOC directly
+                </a>
               </div>
             </div>
           )}
@@ -193,9 +214,10 @@ export function PageViewer({
                   <p className="text-stone-500 text-xs mb-3">{errorReason}</p>
                 )}
                 <a
-                  href={resourceUrl ?? imageUrl}
+                  href={bestLinkUrl(resourceUrl, imageUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
                   className="inline-block px-4 py-2 bg-amber-800 text-amber-50 text-sm rounded hover:bg-amber-700"
                 >
                   Open on Library of Congress
