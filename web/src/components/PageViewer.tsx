@@ -24,6 +24,10 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
     }
   }, [imageUrl]);
 
+  const proxiedUrl = imageUrl
+    ? `/api/page-image?url=${encodeURIComponent(imageUrl)}`
+    : null;
+
   const zoom = ZOOM_LEVELS[zoomIdx];
 
   const handleZoomIn = useCallback(() => {
@@ -77,8 +81,8 @@ export function PageViewer({ imageUrl, className = "" }: PageViewerProps) {
           )}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            key={imageUrl}
-            src={imageUrl}
+            key={proxiedUrl ?? ""}
+            src={proxiedUrl ?? ""}
             alt="Newspaper page scan"
             onLoad={() => { setLoaded(true); setError(false); }}
             onError={() => { setLoaded(false); setError(true); }}
