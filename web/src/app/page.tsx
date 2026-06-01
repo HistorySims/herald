@@ -7,6 +7,7 @@ import type { Citation } from "@/lib/types";
 
 export default function Home() {
   const [viewerImageUrl, setViewerImageUrl] = useState<string | null>(null);
+  const [viewerResourceUrl, setViewerResourceUrl] = useState<string | null>(null);
   const [activeCitationIndex, setActiveCitationIndex] = useState<number | null>(
     null
   );
@@ -20,6 +21,7 @@ export default function Home() {
 
   const handleCitationClick = useCallback((citation: Citation) => {
     setViewerImageUrl(citation.image_url);
+    setViewerResourceUrl(citation.resource_url);
     setActiveCitationIndex(citation.index);
     setViewerMeta({
       paper: citation.paper_title,
@@ -111,7 +113,10 @@ export default function Home() {
             </div>
           )}
           <div className="flex-1 min-h-0">
-            <PageViewer imageUrl={viewerImageUrl} />
+            <PageViewer
+              imageUrl={viewerImageUrl}
+              resourceUrl={viewerResourceUrl}
+            />
           </div>
         </div>
       )}
