@@ -1,52 +1,63 @@
 import { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
+
+interface NestedChunkRow {
+  id: string;
+  content: string;
+  page_id: string;
+  pages: {
+    sequence: number;
+    image_url: string;
+    issues: {
+      date_issued: string;
+      edition: number;
+      papers: { lccn: string; title: string } | null;
+    } | null;
+  } | null;
+}
+
+function deriveResourceUrl(
+  lccn: string,
+  dateIssued: string,
+  edition: number,
+  pageSequence: number
+): string {
+  return `https://www.loc.gov/resource/${lccn}/${dateIssued}/ed-${edition}/seq-${pageSequence}/`;
+}
 
 export async function GET(request: NextRequest) {
+  if (!checkRateLimit("explore-read", clientIp(request))) {
+    return rateLimitResponse();
+  }
+
   const id = request.nextUrl.searchParams.get("id");
   if (!id) {
-    return Response.json({ error: "Missing id parameter" }, { status: 400 });
+    return jsonError("Missing id parameter", 400);
   }
 
   const supabase = getSupabase();
 
-  const { data: chunk, error: chunkError } = await supabase
+  const { data, error } = await supabase
     .from("chunks")
-    .select("id, content, page_id")
+    .select(
+      "id, content, page_id, pages!inner(sequence, image_url, issues!inner(date_issued, edition, papers!inner(lccn, title)))"
+    )
     .eq("id", id)
     .single();
 
-  if (chunkError || !chunk) {
-    return Response.json({ error: "Chunk not found" }, { status: 404 });
+  if (error || !data) {
+    return jsonError("Chunk not found", 404);
   }
 
-  const { data: page, error: pageError } = await supabase
-    .from("pages")
-    .select("id, sequence, image_url, issue_id")
-    .eq("id", chunk.page_id)
-    .single();
-
-  if (pageError || !page) {
-    return Response.json({ error: "Page not found" }, { status: 404 });
-  }
-
-  const { data: issue, error: issueError } = await supabase
-    .from("issues")
-    .select("id, date_issued, edition, paper_id")
-    .eq("id", page.issue_id)
-    .single();
-
-  if (issueError || !issue) {
-    return Response.json({ error: "Issue not found" }, { status: 404 });
-  }
-
-  const { data: paper, error: paperError } = await supabase
-    .from("papers")
-    .select("lccn, title")
-    .eq("id", issue.paper_id)
-    .single();
-
-  if (paperError || !paper) {
-    return Response.json({ error: "Paper not found" }, { status: 404 });
+  const row = data as unknown as NestedChunkRow;
+  if (!row.pages?.issues?.papers) {
+    return jsonError("Chunk has no associated paper", 404);
   }
 
   const { data: activeRun } = await supabase
@@ -69,15 +80,25 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  const paper = row.pages.issues.papers;
+  const issue = row.pages.issues;
+  const page = row.pages;
+
   return Response.json({
-    chunk_id: chunk.id,
-    content: chunk.content,
+    chunk_id: row.id,
+    content: row.content,
     paper_title: paper.title,
     paper_lccn: paper.lccn,
     date_issued: issue.date_issued,
     edition: issue.edition,
     page_sequence: page.sequence,
     image_url: page.image_url,
+    resource_url: deriveResourceUrl(
+      paper.lccn,
+      issue.date_issued,
+      issue.edition,
+      page.sequence
+    ),
     cluster_labels: clusterLabels,
     content_type: contentType,
   });

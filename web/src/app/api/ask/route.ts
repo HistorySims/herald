@@ -2,63 +2,35 @@ import { NextRequest } from "next/server";
 import { retrieve, retrieveScoped } from "@/lib/retrieval";
 import { synthesizeStream } from "@/lib/synth";
 import type { AskRequest } from "@/lib/types";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
 
 const MAX_QUESTION_LENGTH = 500;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 10;
-
-const ipBuckets = new Map<string, number[]>();
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const timestamps = ipBuckets.get(ip) ?? [];
-  const recent = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  if (recent.length >= RATE_LIMIT_MAX) {
-    ipBuckets.set(ip, recent);
-    return false;
-  }
-  recent.push(now);
-  ipBuckets.set(ip, recent);
-  return true;
-}
 
 export async function POST(req: NextRequest) {
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-
-  if (!checkRateLimit(ip)) {
-    return new Response(
-      JSON.stringify({ error: "Rate limit exceeded. Try again in a minute." }),
-      { status: 429, headers: { "Retry-After": "60", "Content-Type": "application/json" } }
-    );
+  if (!checkRateLimit("ask", clientIp(req))) {
+    return rateLimitResponse();
   }
 
   let body: AskRequest;
   try {
     body = await req.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonError("Invalid JSON body", 400);
   }
 
   const { question, mode, paper_lccn, date_from, date_to, scope_tier, scope_label } = body;
 
   if (!question || typeof question !== "string") {
-    return new Response(
-      JSON.stringify({ error: "Missing or invalid 'question' field" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonError("Missing or invalid 'question' field", 400);
   }
 
   if (question.length > MAX_QUESTION_LENGTH) {
-    return new Response(
-      JSON.stringify({
-        error: `Question exceeds ${MAX_QUESTION_LENGTH} character limit`,
-      }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonError(`Question exceeds ${MAX_QUESTION_LENGTH} character limit`, 400);
   }
 
   const encoder = new TextEncoder();

@@ -1,10 +1,20 @@
 import { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
 
 const MAX_MATCHES = 5000;
 const PAGE = 1000;
 
 export async function GET(request: NextRequest) {
+  if (!checkRateLimit("search", clientIp(request))) {
+    return rateLimitResponse();
+  }
+
   const q = request.nextUrl.searchParams.get("q")?.trim();
   if (!q) {
     return Response.json({ chunk_ids: [] });
@@ -24,7 +34,7 @@ export async function GET(request: NextRequest) {
       .range(offset, offset + PAGE - 1);
 
     if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
     if (!data || data.length === 0) break;
 

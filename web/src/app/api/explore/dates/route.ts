@@ -1,4 +1,11 @@
+import type { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
 
 interface NestedRow {
   chunk_id: string;
@@ -11,7 +18,11 @@ interface NestedRow {
   } | null;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!checkRateLimit("explore-read", clientIp(req))) {
+    return rateLimitResponse();
+  }
+
   const supabase = getSupabase();
 
   const { data: activeRun, error: runError } = await supabase
@@ -20,7 +31,7 @@ export async function GET() {
     .single();
 
   if (runError || !activeRun) {
-    return Response.json({ error: "No active cluster run" }, { status: 404 });
+    return jsonError("No active cluster run", 404);
   }
 
   const all: { chunkId: string; dateIssued: string }[] = [];
@@ -36,7 +47,7 @@ export async function GET() {
       .range(offset, offset + pageSize - 1);
 
     if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
     if (!data || data.length === 0) break;
 
@@ -52,7 +63,7 @@ export async function GET() {
   }
 
   if (all.length === 0) {
-    return Response.json({ error: "No date data" }, { status: 404 });
+    return jsonError("No date data", 404);
   }
 
   let minDate = "9999-12-31";

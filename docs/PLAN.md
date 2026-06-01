@@ -1,7 +1,10 @@
 # Herald — Plan
 
 > **Working title:** Herald — semantic research over historical American newspapers.
-> **This document is the plan only.** No code is written in this PR. After approval and merge, Phase 1 begins.
+
+> **STATUS (June 2026):** Phases 1 and 2 are shipped — the CLI, ingest, hybrid retrieval, web UI with citations, and conversation history all exist and work. Phase 3 (auth, Stripe, vision-based 5¢ Cleanup) is **deferred indefinitely**: the Library of Congress now sits behind Cloudflare bot protection that blocks our cloud-IP fetches for both ingest *and* image retrieval. Until LOC allowlists us or we find another path to the page images, the cleanup feature can't run.
+>
+> A major addition not in this plan — **the `/explore` page** with hierarchical clustering, burstiness ranking, and cluster stories — grew organically post-Phase-2 and is now the heart of the product. See `docs/CLUSTERING_PLAN.md` for that design and `docs/STATUS.md` for the current product description.
 
 ---
 

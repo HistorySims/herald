@@ -1,4 +1,11 @@
+import type { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
 
 interface ProjectionRow {
   x: number;
@@ -36,7 +43,11 @@ async function fetchAllProjections(runId: string): Promise<ProjectionRow[]> {
   return allRows;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!checkRateLimit("explore-read", clientIp(req))) {
+    return rateLimitResponse();
+  }
+
   const supabase = getSupabase();
 
   const { data: activeRun, error: runError } = await supabase
@@ -45,9 +56,9 @@ export async function GET() {
     .single();
 
   if (runError || !activeRun) {
-    return Response.json(
-      { error: `No active cluster run: ${runError?.message ?? "empty result"}` },
-      { status: 404 }
+    return jsonError(
+      `No active cluster run: ${runError?.message ?? "empty result"}`,
+      404
     );
   }
 
@@ -57,14 +68,14 @@ export async function GET() {
   try {
     data = await fetchAllProjections(runId);
   } catch (e) {
-    return Response.json(
-      { error: e instanceof Error ? e.message : "Failed to fetch projections" },
-      { status: 500 }
+    return jsonError(
+      e instanceof Error ? e.message : "Failed to fetch projections",
+      500
     );
   }
 
   if (data.length === 0) {
-    return Response.json({ error: "No projection data found" }, { status: 404 });
+    return jsonError("No projection data found", 404);
   }
 
   const n = data.length;

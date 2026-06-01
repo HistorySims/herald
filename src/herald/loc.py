@@ -48,10 +48,6 @@ DEFAULT_MIN_INTERVAL_SECS = 6.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BASE_DELAY = 2.0
 DEFAULT_RATE_LIMIT_PAD_SECS = 10.0
-# Hard cap on paginated search depth. Vestigial — kept on the
-# constructor so callers can still pass it for the (now-unused)
-# search path; the active date-walking enumerator doesn't paginate.
-DEFAULT_MAX_PAGINATION_DEPTH = 100
 
 
 @dataclass(frozen=True)
@@ -99,7 +95,6 @@ class LOCClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
         rate_limit_pad_secs: float = DEFAULT_RATE_LIMIT_PAD_SECS,
-        max_pagination_depth: int = DEFAULT_MAX_PAGINATION_DEPTH,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._legacy = legacy_base_url.rstrip("/")
@@ -108,7 +103,6 @@ class LOCClient:
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._rate_limit_pad = rate_limit_pad_secs
-        self._max_pagination_depth = max_pagination_depth
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             headers={"User-Agent": user_agent, "Accept": "application/json"},

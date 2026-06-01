@@ -1,8 +1,8 @@
 # Herald Phase 2 — Web UI Plan
 
-> **Prerequisite:** Phase 1 is complete. All 20 PRs merged; 110 tests pass; the CLI (`herald ask`) produces well-cited answers for all 10 validation questions.
+> **STATUS (June 2026):** Phase 2 is shipped. The split-screen UI, citation badges, conversation history, response modes, and date/paper filters all work. A few sections of this plan diverged from what was built — most notably the **page viewer**: LOC's Cloudflare protection means we can't render images inline, so the viewer now shows a clean "Open on Library of Congress" card instead of attempting inline display. See `docs/STATUS.md` for the current product description.
 >
-> **This document is the plan for Phase 2.** After approval and merge, implementation begins.
+> **Prerequisite:** Phase 1 is complete. All 20 PRs merged; 110 tests pass; the CLI (`herald ask`) produces well-cited answers for all 10 validation questions.
 
 ---
 

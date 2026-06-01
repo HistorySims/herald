@@ -2,6 +2,12 @@ import { NextRequest } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { synthesizeStream } from "@/lib/synth";
 import type { RankedChunk, Citation, AskResponse } from "@/lib/types";
+import {
+  checkRateLimit,
+  clientIp,
+  jsonError,
+  rateLimitResponse,
+} from "@/lib/rate-limit";
 
 const STORY_QUESTION =
   "What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages.";
@@ -43,11 +49,15 @@ function pickEvenlyByDate(rows: { chunk_id: string; date: string }[], n: number)
 }
 
 export async function POST(req: NextRequest) {
+  if (!checkRateLimit("cluster-story", clientIp(req))) {
+    return rateLimitResponse();
+  }
+
   let body: { tier?: number; label?: number };
   try {
     body = await req.json();
   } catch {
-    return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    return jsonError("Invalid JSON body", 400);
   }
 
   const { tier, label } = body;
@@ -57,10 +67,10 @@ export async function POST(req: NextRequest) {
     label === undefined ||
     label === null
   ) {
-    return Response.json({ error: "Missing tier or label" }, { status: 400 });
+    return jsonError("Missing tier or label", 400);
   }
   if (tier < 0 || tier > 3) {
-    return Response.json({ error: "tier must be 0-3" }, { status: 400 });
+    return jsonError("tier must be 0-3", 400);
   }
 
   const supabase = getSupabase();
@@ -69,7 +79,7 @@ export async function POST(req: NextRequest) {
     .select("run_id")
     .single();
   if (runError || !activeRun) {
-    return Response.json({ error: "No active cluster run" }, { status: 404 });
+    return jsonError("No active cluster run", 404);
   }
   const runId = activeRun.run_id;
 
@@ -82,7 +92,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (clusterError || !cluster) {
-    return Response.json({ error: "Cluster not found" }, { status: 404 });
+    return jsonError("Cluster not found", 404);
   }
 
   const encoder = new TextEncoder();
@@ -134,7 +144,7 @@ export async function POST(req: NextRequest) {
       .range(offset, offset + pageSize - 1);
 
     if (error) {
-      return Response.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
     if (!data || data.length === 0) break;
 
