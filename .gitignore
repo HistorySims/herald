@@ -46,3 +46,4 @@ Thumbs.db
 
 # One-off diagnostic outputs from scripts/
 scripts/bertopic_output_*.md
+scripts/cluster_labels_*.md
