@@ -48,6 +48,10 @@ DEFAULT_MIN_INTERVAL_SECS = 6.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BASE_DELAY = 2.0
 DEFAULT_RATE_LIMIT_PAD_SECS = 10.0
+# Hard cap on paginated search depth. Vestigial — kept on the
+# constructor so callers can still pass it for the (now-unused)
+# search path; the active date-walking enumerator doesn't paginate.
+DEFAULT_MAX_PAGINATION_DEPTH = 100
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class LOCClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_RETRY_BASE_DELAY,
         rate_limit_pad_secs: float = DEFAULT_RATE_LIMIT_PAD_SECS,
+        max_pagination_depth: int = DEFAULT_MAX_PAGINATION_DEPTH,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._legacy = legacy_base_url.rstrip("/")
@@ -103,6 +108,7 @@ class LOCClient:
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._rate_limit_pad = rate_limit_pad_secs
+        self._max_pagination_depth = max_pagination_depth
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             headers={"User-Agent": user_agent, "Accept": "application/json"},
@@ -419,7 +425,7 @@ class LOCClient:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if resp.status_code == 429 or resp.status_code == 403 or resp.status_code >= 500:
+            if resp.status_code == 429 or resp.status_code >= 500:
                 last = httpx.HTTPStatusError(
                     f"loc {resp.status_code}", request=resp.request, response=resp,
                 )
@@ -430,14 +436,10 @@ class LOCClient:
                     # Honor LOC's hint, with a 1s floor.
                     await asyncio.sleep(max(int(ra), 1))
                 else:
-                    # 429/403 mean "really back off" — pad significantly more
+                    # 429 means "really back off" — pad significantly more
                     # than for 5xx. The cool-off lets LOC's per-minute
                     # window roll over.
-                    pad = (
-                        self._rate_limit_pad
-                        if resp.status_code in (429, 403)
-                        else 0.0
-                    )
+                    pad = self._rate_limit_pad if resp.status_code == 429 else 0.0
                     await asyncio.sleep(delay + pad)
                     delay *= 2
                 continue
