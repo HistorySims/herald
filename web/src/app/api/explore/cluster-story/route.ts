@@ -10,9 +10,14 @@ import {
 } from "@/lib/rate-limit";
 
 const STORY_QUESTION =
-  "What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages.";
+  "What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages. The passages are drawn from a single semantic cluster; do not invent connections to topics not present in the passages themselves.";
 
 const REP_CHUNK_COUNT = 12;
+// If the clicked cluster has fewer chunks than this, we'll supplement
+// with chunks from the closest-centroid sibling clusters at the same
+// tier — otherwise the synthesis runs strictly on cluster members.
+const MIN_CLUSTER_CHUNKS = 6;
+const NEIGHBOR_TOP_K = 2;
 
 interface ProjectionRow {
   chunk_id: string;
@@ -36,6 +41,13 @@ interface ChunkRow {
   } | null;
 }
 
+interface ClusterRow {
+  id: string;
+  label: number;
+  size: number;
+  centroid: number[] | string | null;
+}
+
 function pickEvenlyByDate(rows: { chunk_id: string; date: string }[], n: number): string[] {
   if (rows.length <= n) return rows.map((r) => r.chunk_id);
   const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
@@ -48,19 +60,46 @@ function pickEvenlyByDate(rows: { chunk_id: string; date: string }[], n: number)
   return Array.from(new Set(picked));
 }
 
+function parseCentroid(c: number[] | string | null): number[] | null {
+  if (Array.isArray(c)) return c;
+  if (typeof c !== "string") return null;
+  try {
+    const trimmed = c.trim();
+    if (trimmed.startsWith("[")) return JSON.parse(trimmed) as number[];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function cosineDistance(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 2;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  if (denom === 0) return 2;
+  return 1 - dot / denom;
+}
+
 export async function POST(req: NextRequest) {
   if (!checkRateLimit("cluster-story", clientIp(req))) {
     return rateLimitResponse();
   }
 
-  let body: { tier?: number; label?: number };
+  let body: { tier?: number; label?: number; refresh?: boolean };
   try {
     body = await req.json();
   } catch {
     return jsonError("Invalid JSON body", 400);
   }
 
-  const { tier, label } = body;
+  const { tier, label, refresh } = body;
   if (
     tier === undefined ||
     tier === null ||
@@ -85,7 +124,7 @@ export async function POST(req: NextRequest) {
 
   const { data: cluster, error: clusterError } = await supabase
     .from("clusters")
-    .select("id, story_text, story_citations")
+    .select("id, size, centroid, story_text, story_citations")
     .eq("run_id", runId)
     .eq("tier", tier)
     .eq("label", label)
@@ -97,7 +136,7 @@ export async function POST(req: NextRequest) {
 
   const encoder = new TextEncoder();
 
-  if (cluster.story_text) {
+  if (!refresh && cluster.story_text) {
     const cached: AskResponse = {
       text: cluster.story_text,
       citations: (cluster.story_citations ?? []) as Citation[],
@@ -130,6 +169,34 @@ export async function POST(req: NextRequest) {
   const tierCol = `cluster_t${tier}` as
     | "cluster_t0" | "cluster_t1" | "cluster_t2" | "cluster_t3";
 
+  // Determine which cluster labels to pull from. STRICT by default —
+  // only the clicked cluster. If the cluster has fewer chunks than
+  // MIN_CLUSTER_CHUNKS, supplement with the K nearest-centroid sibling
+  // clusters so the synthesis has enough material.
+  const sourceLabels: number[] = [label];
+  if (cluster.size < MIN_CLUSTER_CHUNKS) {
+    const targetCentroid = parseCentroid(cluster.centroid);
+    if (targetCentroid) {
+      const { data: siblings } = await supabase
+        .from("clusters")
+        .select("label, centroid")
+        .eq("run_id", runId)
+        .eq("tier", tier)
+        .neq("label", label);
+      const ranked: { label: number; dist: number }[] = [];
+      for (const s of (siblings ?? []) as ClusterRow[]) {
+        const vec = parseCentroid(s.centroid);
+        if (vec && vec.length === targetCentroid.length) {
+          ranked.push({ label: s.label, dist: cosineDistance(targetCentroid, vec) });
+        }
+      }
+      ranked.sort((a, b) => a.dist - b.dist);
+      for (const n of ranked.slice(0, NEIGHBOR_TOP_K)) {
+        sourceLabels.push(n.label);
+      }
+    }
+  }
+
   const all: { chunk_id: string; date: string }[] = [];
   const pageSize = 1000;
   let offset = 0;
@@ -140,7 +207,7 @@ export async function POST(req: NextRequest) {
         "chunk_id, chunks!inner(pages!inner(issues!inner(date_issued)))"
       )
       .eq("run_id", runId)
-      .eq(tierCol, label)
+      .in(tierCol, sourceLabels)
       .range(offset, offset + pageSize - 1);
 
     if (error) {

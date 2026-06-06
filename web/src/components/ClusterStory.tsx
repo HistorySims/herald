@@ -15,16 +15,22 @@ export function ClusterStory({ tier, label, onClose }: ClusterStoryProps) {
   const [streaming, setStreaming] = useState(true);
   const [cacheHit, setCacheHit] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshCounter, setRefreshCounter] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setText("");
+    setCitations([]);
+    setStreaming(true);
+    setCacheHit(false);
+    setError(null);
 
     async function run() {
       try {
         const resp = await fetch("/api/explore/cluster-story", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tier, label }),
+          body: JSON.stringify({ tier, label, refresh: refreshCounter > 0 }),
         });
         if (!resp.ok) {
           const err = await resp.json();
@@ -93,7 +99,7 @@ export function ClusterStory({ tier, label, onClose }: ClusterStoryProps) {
 
     run();
     return () => { cancelled = true; };
-  }, [tier, label]);
+  }, [tier, label, refreshCounter]);
 
   return (
     <div className="border-t border-stone-700 p-4">
@@ -106,12 +112,23 @@ export function ClusterStory({ tier, label, onClose }: ClusterStoryProps) {
             </span>
           )}
         </h3>
-        <button
-          onClick={onClose}
-          className="text-stone-500 hover:text-stone-300 text-sm"
-        >
-          Close
-        </button>
+        <div className="flex items-center gap-3">
+          {!streaming && (
+            <button
+              onClick={() => setRefreshCounter((c) => c + 1)}
+              className="text-amber-500 hover:text-amber-400 text-xs underline"
+              title="Re-run synthesis (skips cache, costs ~$0.05)"
+            >
+              Regenerate
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="text-stone-500 hover:text-stone-300 text-sm"
+          >
+            Close
+          </button>
+        </div>
       </div>
 
       {error && (
