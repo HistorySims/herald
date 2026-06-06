@@ -38,6 +38,12 @@ dev = [
     "ruff>=0.5",
     "pyright>=1.1.370",
 ]
+# Analysis-only group: one-off diagnostic scripts under scripts/.
+# Do NOT promote these to runtime `dependencies`. Install with
+# `uv sync --group analysis` (or `uv pip install bertopic`).
+analysis = [
+    "bertopic>=0.16",
+]
 
 [tool.ruff]
 line-length = 100
