@@ -5,11 +5,16 @@ Categories:
   1 = ad (advertisements, classifieds)
   2 = legal (legal notices, court announcements)
   3 = bad_ocr (garbled / unintelligible text)
+
+Quality scoring (separate from category): a continuous read of OCR
+quality used by scripts/score_chunk_quality.py to populate the
+chunks.status / .quality_score / .quality_subscores columns.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 CONTENT = 0
@@ -106,3 +111,110 @@ def classify_chunk(content: str) -> int:
 
 
 LABELS = {CONTENT: "content", AD: "ad", LEGAL: "legal", BAD_OCR: "bad_ocr"}
+
+
+# ---- continuous quality scoring -----------------------------------
+
+@dataclass(frozen=True)
+class QualityScores:
+    """Continuous OCR quality sub-scores. Higher dict_word_ratio is better."""
+
+    non_alpha_ratio: float    # fraction of non-alphabetic chars (excl. spaces); 1.0 = no letters
+    avg_word_len: float       # mean characters per whitespace-split token
+    dict_word_ratio: float    # fraction of tokens recognised by the bundled wordlist; 1.0 = perfect
+    word_count: int           # raw token count, exposed for downstream filtering
+
+    def composite(self) -> float:
+        """Single scalar in [0, 1] suitable for chunks.quality_score.
+
+        Mostly dict_word_ratio with structural penalties so a chunk
+        full of single-letter junk doesn't score the same as a chunk
+        full of names.
+        """
+        score = self.dict_word_ratio
+        if self.avg_word_len < 2.0 or self.avg_word_len > 16.0:
+            score *= 0.5
+        if self.non_alpha_ratio > 0.5:
+            score *= 0.5
+        return max(0.0, min(1.0, score))
+
+    def to_dict(self) -> dict[str, float | int]:
+        return asdict(self)
+
+
+# Quarantine thresholds. dict_word_ratio is the primary signal; the
+# structural checks (very-short or very-long avg word, mostly-non-alpha
+# content) catch garbage that doesn't match the dictionary at all.
+QUARANTINE_DICT_RATIO = 0.15
+RECOVERY_CANDIDATE_DICT_RATIO = 0.35
+
+
+def compute_quality_scores(content: str) -> QualityScores:
+    """Continuous quality sub-scores for one chunk."""
+    if not content or not content.strip():
+        return QualityScores(
+            non_alpha_ratio=1.0, avg_word_len=0.0, dict_word_ratio=0.0, word_count=0,
+        )
+
+    words = content.split()
+    word_count = len(words)
+    if word_count == 0:
+        return QualityScores(
+            non_alpha_ratio=1.0, avg_word_len=0.0, dict_word_ratio=0.0, word_count=0,
+        )
+
+    alpha_chars = sum(1 for ch in content if ch.isalpha())
+    no_space = content.replace(" ", "").replace("\t", "").replace("\n", "")
+    non_alpha_ratio = (
+        1.0 - (alpha_chars / len(no_space)) if len(no_space) > 0 else 1.0
+    )
+
+    avg_word_len = sum(len(w) for w in words) / word_count
+
+    wordlist = _load_wordlist()
+    if wordlist:
+        known = sum(
+            1 for w in words if w.lower().strip(".,;:!?\"'()-") in wordlist
+        )
+        dict_word_ratio = known / word_count
+    else:
+        dict_word_ratio = 0.0
+
+    return QualityScores(
+        non_alpha_ratio=non_alpha_ratio,
+        avg_word_len=avg_word_len,
+        dict_word_ratio=dict_word_ratio,
+        word_count=word_count,
+    )
+
+
+def classify_quality(scores: QualityScores) -> tuple[str, str | None]:
+    """Map continuous scores → (status, reason).
+
+    - Structural garbage (very short / very long avg word, mostly
+      non-alpha) ALWAYS quarantines, regardless of dict ratio. Catches
+      chunks like "M c i l l e h t e r" or pure punctuation salad.
+    - Low dict ratio + no structural failure → 'recovery_candidate':
+      could be names, foreign words, period-specific terms. Stays active.
+    - Mid dict ratio → 'recovery_candidate' but still active.
+    - High dict ratio → fully active.
+
+    Returns (status, reason). reason may be None for clean chunks.
+    """
+    if scores.word_count < 3:
+        return ("quarantined", "too_short")
+
+    structurally_broken = (
+        scores.avg_word_len < 1.5
+        or scores.avg_word_len > 18.0
+        or scores.non_alpha_ratio > 0.6
+    )
+
+    if scores.dict_word_ratio < QUARANTINE_DICT_RATIO and structurally_broken:
+        return ("quarantined", "garbage_ocr")
+    if scores.dict_word_ratio < QUARANTINE_DICT_RATIO:
+        # low dict but structurally OK → names / numbers / non-English
+        return ("active", "recovery_candidate")
+    if scores.dict_word_ratio < RECOVERY_CANDIDATE_DICT_RATIO:
+        return ("active", "recovery_candidate")
+    return ("active", None)
