@@ -10,7 +10,7 @@ import {
 } from "@/lib/rate-limit";
 
 const STORY_QUESTION =
-  "What story do these passages collectively tell? Summarize the key events, people, places, and dates. Note how the coverage evolves across the dates of the passages. The passages are drawn from a single semantic cluster; do not invent connections to topics not present in the passages themselves.";
+  "These passages were selected as the most representative samples from a single semantic cluster of 1840s newspaper coverage. What is the dominant story they tell? Summarize the key events, people, places, and dates. Note how coverage evolves across dates. If a small number of passages stray onto an unrelated topic (e.g. shared vocabulary about violence but a different event), focus on the dominant theme and ignore the strays — do not write a 'two stories' summary.";
 
 const REP_CHUNK_COUNT = 12;
 // If the clicked cluster has fewer chunks than this, we'll supplement
@@ -22,6 +22,7 @@ const NEIGHBOR_TOP_K = 2;
 interface ProjectionRow {
   chunk_id: string;
   chunks: {
+    embedding?: number[] | string | null;
     pages: { issues: { date_issued: string } | null } | null;
   } | null;
 }
@@ -197,14 +198,21 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const all: { chunk_id: string; date: string }[] = [];
+  // Fetch chunks IN the source clusters along with their embeddings,
+  // so we can rank by distance to the target cluster's centroid and
+  // drop mixed-content boundary chunks before they reach Sonnet.
+  const all: {
+    chunk_id: string;
+    date: string;
+    embedding: number[] | string | null;
+  }[] = [];
   const pageSize = 1000;
   let offset = 0;
   while (true) {
     const { data, error } = await supabase
       .from("chunk_projections")
       .select(
-        "chunk_id, chunks!inner(pages!inner(issues!inner(date_issued)))"
+        "chunk_id, chunks!inner(embedding, pages!inner(issues!inner(date_issued)))"
       )
       .eq("run_id", runId)
       .in(tierCol, sourceLabels)
@@ -217,7 +225,13 @@ export async function POST(req: NextRequest) {
 
     for (const row of data as unknown as ProjectionRow[]) {
       const d = row.chunks?.pages?.issues?.date_issued;
-      if (d) all.push({ chunk_id: row.chunk_id, date: d });
+      if (d) {
+        all.push({
+          chunk_id: row.chunk_id,
+          date: d,
+          embedding: row.chunks?.embedding ?? null,
+        });
+      }
     }
 
     if (data.length < pageSize) break;
@@ -225,13 +239,37 @@ export async function POST(req: NextRequest) {
   }
 
   if (all.length === 0) {
-    return Response.json(
-      { error: "No chunks found for cluster" },
-      { status: 404 }
-    );
+    return jsonError("No chunks found for cluster", 404);
   }
 
-  const repIds = pickEvenlyByDate(all, REP_CHUNK_COUNT);
+  // Rank chunks by cosine distance to the TARGET cluster's centroid,
+  // take the top REP_CHUNK_COUNT (most cluster-typical), then sort
+  // those by date so Sonnet sees the story in chronological order.
+  const targetCentroid = parseCentroid(cluster.centroid);
+  let repIds: string[];
+  if (targetCentroid) {
+    const ranked = all
+      .map((c) => {
+        const vec = parseCentroid(c.embedding);
+        const dist =
+          vec && vec.length === targetCentroid.length
+            ? cosineDistance(targetCentroid, vec)
+            : 2;
+        return { chunk_id: c.chunk_id, date: c.date, dist };
+      })
+      .filter((r) => r.dist < 1.5)
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, REP_CHUNK_COUNT)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    repIds = ranked.map((r) => r.chunk_id);
+  } else {
+    // Fallback if the centroid is missing — preserves old behavior.
+    repIds = pickEvenlyByDate(all, REP_CHUNK_COUNT);
+  }
+
+  if (repIds.length === 0) {
+    return jsonError("Could not select representative chunks", 500);
+  }
 
   const { data: chunksData, error: chunksErr } = await supabase
     .from("chunks")
