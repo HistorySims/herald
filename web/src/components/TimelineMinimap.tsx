@@ -212,6 +212,99 @@ export function TimelineMinimap({
     [indexAt, onChunkClick]
   );
 
+  // Touch handlers — single-finger pan + tap-to-click + pinch-to-zoom.
+  // We track whether a touch moved enough to count as a drag; if not,
+  // a tap fires onChunkClick.
+  const touchState = useRef<{
+    startScroll: number;
+    startY: number;
+    startX: number;
+    moved: boolean;
+    pinchStartDist: number | null;
+    pinchStartChunkHeight: number;
+  } | null>(null);
+
+  const onTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLCanvasElement>) => {
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchState.current = {
+          startScroll: scrollY,
+          startY: t.clientY,
+          startX: t.clientX,
+          moved: false,
+          pinchStartDist: null,
+          pinchStartChunkHeight: chunkHeight,
+        };
+      } else if (e.touches.length === 2) {
+        const [a, b] = [e.touches[0], e.touches[1]];
+        const dx = a.clientX - b.clientX;
+        const dy = a.clientY - b.clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        touchState.current = {
+          startScroll: scrollY,
+          startY: (a.clientY + b.clientY) / 2,
+          startX: (a.clientX + b.clientX) / 2,
+          moved: true,
+          pinchStartDist: dist,
+          pinchStartChunkHeight: chunkHeight,
+        };
+      }
+    },
+    [scrollY, chunkHeight]
+  );
+
+  const onTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLCanvasElement>) => {
+      const state = touchState.current;
+      if (!state) return;
+      e.preventDefault();
+
+      if (e.touches.length === 2 && state.pinchStartDist) {
+        const [a, b] = [e.touches[0], e.touches[1]];
+        const dx = a.clientX - b.clientX;
+        const dy = a.clientY - b.clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const next = Math.max(
+          MIN_CHUNK_HEIGHT,
+          Math.min(
+            MAX_CHUNK_HEIGHT,
+            state.pinchStartChunkHeight * (dist / state.pinchStartDist)
+          )
+        );
+        setChunkHeight(next);
+      } else if (e.touches.length === 1) {
+        const t = e.touches[0];
+        const dy = state.startY - t.clientY;
+        const dx = state.startX - t.clientX;
+        if (Math.abs(dy) > 4 || Math.abs(dx) > 4) state.moved = true;
+        setScrollY(
+          Math.max(0, Math.min(maxScroll, state.startScroll + dy))
+        );
+      }
+    },
+    [maxScroll]
+  );
+
+  const onTouchEnd = useCallback(
+    (e: React.TouchEvent<HTMLCanvasElement>) => {
+      const state = touchState.current;
+      if (!state) return;
+      // Tap-to-click: only fire when finger didn't drag
+      if (!state.moved && e.changedTouches.length === 1 && onChunkClick) {
+        const t = e.changedTouches[0];
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const idx = indexAt(t.clientX - rect.left, t.clientY - rect.top);
+          if (idx !== null) onChunkClick(idx);
+        }
+      }
+      touchState.current = null;
+    },
+    [indexAt, onChunkClick]
+  );
+
   // Drawing — rAF scheduled by useEffect; cancel in cleanup so we don't
   // pile up frames. The effect's deps list is the closure over what the
   // draw function actually uses.
@@ -380,6 +473,10 @@ export function TimelineMinimap({
         onMouseMove={onMouseMove}
         onMouseLeave={onMouseLeave}
         onClick={onClick}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
         className="block cursor-crosshair select-none"
         style={{ touchAction: "none" }}
       />
@@ -404,9 +501,9 @@ export function TimelineMinimap({
         </div>
       )}
 
-      {/* Zoom hint */}
+      {/* Interaction hint */}
       <div className="absolute bottom-1 left-1 text-[9px] text-stone-600 pointer-events-none">
-        ⌘+wheel zoom · drag pan
+        pinch zoom · drag pan · tap a bar
       </div>
     </div>
   );

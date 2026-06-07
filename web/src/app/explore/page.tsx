@@ -34,6 +34,7 @@ export default function ExplorePage() {
   const [dates, setDates] = useState<DatesData | null>(null);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
   const [showMinimap, setShowMinimap] = useState(true);
+  const [mobileView, setMobileView] = useState<"map" | "timeline">("map");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tier, setTier] = useState(2);
@@ -303,7 +304,36 @@ export default function ExplorePage() {
 
   return (
     <div className="h-full flex flex-col md:flex-row bg-stone-900">
-      <div className="flex-1 relative min-h-[50vh] md:min-h-0">
+      {/* Mobile-only view switcher — desktop shows everything at once */}
+      {timeline && (
+        <div className="md:hidden flex border-b border-stone-800 bg-stone-900">
+          <button
+            onClick={() => setMobileView("map")}
+            className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+              mobileView === "map"
+                ? "bg-stone-800 text-stone-100 border-b-2 border-amber-600"
+                : "text-stone-500"
+            }`}
+          >
+            Cluster Map
+          </button>
+          <button
+            onClick={() => setMobileView("timeline")}
+            className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+              mobileView === "timeline"
+                ? "bg-stone-800 text-stone-100 border-b-2 border-amber-600"
+                : "text-stone-500"
+            }`}
+          >
+            Timeline
+          </button>
+        </div>
+      )}
+      <div
+        className={`flex-1 relative min-h-[50vh] md:min-h-0 ${
+          mobileView === "timeline" ? "hidden md:block" : ""
+        }`}
+      >
         <ExploreMap
           points={points}
           tier={tier}
@@ -342,8 +372,14 @@ export default function ExplorePage() {
         )}
       </div>
 
-      {timeline && showMinimap && (
-        <div className="hidden md:block w-[140px] lg:w-[180px] border-l border-stone-700 bg-stone-950">
+      {timeline && (showMinimap || mobileView === "timeline") && (
+        <div
+          className={`border-stone-700 bg-stone-950 ${
+            mobileView === "timeline"
+              ? "flex-1 min-h-[50vh] md:hidden"
+              : "hidden md:block md:w-[140px] lg:w-[180px] md:border-l"
+          }`}
+        >
           <TimelineMinimap
             timeline={timeline}
             chunkIds={chunkIds}
