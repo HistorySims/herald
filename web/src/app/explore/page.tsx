@@ -8,10 +8,13 @@ import { TimeFilter } from "@/components/TimeFilter";
 import { BurstyTopics } from "@/components/BurstyTopics";
 import { ClusterStory } from "@/components/ClusterStory";
 import { SearchBox } from "@/components/SearchBox";
+import { TimelineMinimap } from "@/components/TimelineMinimap";
 import {
   ExplorePoints,
   parsePointsBinary,
   parseDatesBinary,
+  parseTimelineBinary,
+  TimelineData,
   ChunkDetail as ChunkDetailType,
   ClusterInfo,
 } from "@/lib/explore-data";
@@ -29,6 +32,8 @@ export default function ExplorePage() {
   const [points, setPoints] = useState<ExplorePoints | null>(null);
   const [chunkIds, setChunkIds] = useState<string[] | null>(null);
   const [dates, setDates] = useState<DatesData | null>(null);
+  const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const [showMinimap, setShowMinimap] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tier, setTier] = useState(2);
@@ -113,6 +118,20 @@ export default function ExplorePage() {
       }
     }
     loadDates();
+  }, []);
+
+  useEffect(() => {
+    async function loadTimeline() {
+      try {
+        const resp = await fetch("/api/explore/timeline");
+        if (!resp.ok) return;
+        const buf = await resp.arrayBuffer();
+        setTimeline(parseTimelineBinary(buf));
+      } catch {
+        // Minimap just won't appear
+      }
+    }
+    loadTimeline();
   }, []);
 
   const handlePointClick = useCallback(
@@ -312,7 +331,30 @@ export default function ExplorePage() {
         <div className="absolute bottom-3 left-3 text-xs text-stone-500 bg-stone-800/80 px-2 py-1 rounded">
           Pinch / scroll to zoom · drag to pan · tap a dot
         </div>
+        {timeline && (
+          <button
+            onClick={() => setShowMinimap((v) => !v)}
+            className="hidden md:block absolute bottom-3 right-3 text-xs text-stone-400 hover:text-stone-200 bg-stone-800/80 px-2 py-1 rounded"
+            title="Toggle the chronological minimap on the right"
+          >
+            {showMinimap ? "Hide timeline" : "Show timeline"}
+          </button>
+        )}
       </div>
+
+      {timeline && showMinimap && (
+        <div className="hidden md:block w-[140px] lg:w-[180px] border-l border-stone-700 bg-stone-950">
+          <TimelineMinimap
+            timeline={timeline}
+            chunkIds={chunkIds}
+            tier={tier}
+            searchMatches={searchMatches}
+            contentFilter={contentFilter}
+            minDate={dates?.minDate ?? "1845-06-01"}
+            onChunkClick={handlePointClick}
+          />
+        </div>
+      )}
 
       <div className="w-full md:w-72 lg:w-80 border-t md:border-t-0 md:border-l border-stone-700 bg-stone-900 overflow-y-auto">
         <ExploreSidebar

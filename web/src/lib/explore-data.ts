@@ -48,6 +48,68 @@ export function parseDatesBinary(
   return { count, maxOffset, offsets };
 }
 
+export interface TimelinePapers {
+  lccn: string;
+  title: string;
+}
+
+export interface TimelineData {
+  count: number;
+  papers: TimelinePapers[];
+  paperIdx: Uint16Array;
+  dateOffset: Uint16Array;
+  clusterT0: Int16Array;
+  clusterT1: Int16Array;
+  clusterT2: Int16Array;
+  clusterT3: Int16Array;
+  quality: Uint8Array;
+  contentType: Uint8Array;
+}
+
+export function parseTimelineBinary(buffer: ArrayBuffer): TimelineData {
+  const view = new DataView(buffer);
+  const count = view.getUint32(0, true);
+  const papersByteLen = view.getUint32(4, true);
+
+  const papersText = new TextDecoder().decode(
+    new Uint8Array(buffer, 8, papersByteLen)
+  );
+  const papers: TimelinePapers[] = [];
+  for (const line of papersText.split("\n")) {
+    if (!line) continue;
+    const [lccn, title] = line.split("\t");
+    if (lccn) papers.push({ lccn, title: title ?? lccn });
+  }
+
+  const offset0 = 8 + papersByteLen;
+  const paperIdx = new Uint16Array(count);
+  const dateOffset = new Uint16Array(count);
+  const clusterT0 = new Int16Array(count);
+  const clusterT1 = new Int16Array(count);
+  const clusterT2 = new Int16Array(count);
+  const clusterT3 = new Int16Array(count);
+  const quality = new Uint8Array(count);
+  const contentType = new Uint8Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const o = offset0 + i * 14;
+    paperIdx[i] = view.getUint16(o, true);
+    dateOffset[i] = view.getUint16(o + 2, true);
+    clusterT0[i] = view.getInt16(o + 4, true);
+    clusterT1[i] = view.getInt16(o + 6, true);
+    clusterT2[i] = view.getInt16(o + 8, true);
+    clusterT3[i] = view.getInt16(o + 10, true);
+    quality[i] = view.getUint8(o + 12);
+    contentType[i] = view.getUint8(o + 13);
+  }
+
+  return {
+    count, papers, paperIdx, dateOffset,
+    clusterT0, clusterT1, clusterT2, clusterT3,
+    quality, contentType,
+  };
+}
+
 export interface ClusterInfo {
   label: number;
   size: number;
