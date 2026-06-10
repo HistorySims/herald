@@ -50,21 +50,21 @@ export function ChunkDetail({
       {chunk && !loading && (
         <div className="space-y-3">
           <div>
-            <p className="text-xs text-stone-500 font-mono">
+            <p className="text-xs text-stone-500 font-mono break-words">
               {chunk.paper_title}
             </p>
-            <p className="text-xs text-stone-500 font-mono">
+            <p className="text-xs text-stone-500 font-mono break-words">
               {chunk.date_issued} &middot; p.{chunk.page_sequence} &middot;{" "}
               {contentTypeLabel(chunk.content_type)}
             </p>
             {clusterLabel && (
-              <p className="text-xs text-stone-300 mt-1">
+              <p className="text-xs text-stone-300 mt-1 break-words">
                 Cluster: <span className="text-stone-200">{clusterLabel}</span>
               </p>
             )}
           </div>
 
-          <p className="text-sm text-stone-300 leading-relaxed font-serif">
+          <p className="text-sm text-stone-300 leading-relaxed font-serif break-words">
             {chunk.content}
           </p>
 

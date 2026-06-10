@@ -15,16 +15,31 @@ interface TimelineMinimapProps {
   onChunkClick?: (chunkIndex: number) => void;
 }
 
-const GUTTER_PX = 8;
+const GUTTER_PX = 14;        // left axis area for date labels
 const COLUMN_PAD = 2;
 const MIN_CHUNK_HEIGHT = 1;
 const MAX_CHUNK_HEIGHT = 16;
-const DEFAULT_CHUNK_HEIGHT = 2;
+const DEFAULT_CHUNK_HEIGHT = 3;
+const DAY_PAD_PX = 0;        // optional padding between date rows
 
-interface ColumnEntry {
-  /** index into the source timeline arrays (matches chunkIds order) */
-  globalIdx: number;
-  dateOffset: number;
+const MORSE_SEGMENTS = 7;
+const SEARCH_CAP_FRAC = 0.10;
+
+// Deterministic pseudo-random noise table so the Morse pattern is
+// stable across redraws but varies per (chunk, segment).
+const NOISE_LEN = 1024;
+const noiseArr = new Float32Array(NOISE_LEN);
+for (let i = 0; i < NOISE_LEN; i++) {
+  // Cheap LCG-derived noise — Math.random is fine here since we only
+  // generate this once at module load and bake it in.
+  noiseArr[i] = Math.random();
+}
+
+interface DayLayout {
+  date: number;             // dateOffset
+  startY: number;           // top of this date's row
+  rowHeight: number;        // maxChunksAnyPaperThisDay * chunkHeight
+  byPaper: Map<number, number[]>;  // paperIdx → sorted list of global chunk indices
 }
 
 export function TimelineMinimap({
@@ -48,7 +63,6 @@ export function TimelineMinimap({
     null
   );
 
-  // The cluster array for the current tier (typed array view, no copy).
   const clusterArr = useMemo(() => {
     switch (tier) {
       case 0: return timeline.clusterT0;
@@ -59,27 +73,53 @@ export function TimelineMinimap({
     }
   }, [timeline, tier]);
 
-  // Group chunks into per-paper columns, each chronologically ordered.
-  // This is O(N) per filter change. For 26k chunks it's fast enough.
-  const columns = useMemo(() => {
-    const cols: ColumnEntry[][] = timeline.papers.map(() => []);
+  // Group chunks by (date, paper). For each date compute the maximum
+  // chunk count across all papers — that's how tall the row needs to
+  // be so chunks have consistent height regardless of which paper
+  // they belong to, and dates remain aligned across columns.
+  const layout = useMemo(() => {
+    // First pass: bucket by date → paper → [globalIdx]
+    const byDate = new Map<number, Map<number, number[]>>();
+    let maxDate = 0;
     for (let i = 0; i < timeline.count; i++) {
       if (!contentFilter.has(timeline.contentType[i])) continue;
-      const colIdx = timeline.paperIdx[i];
-      if (colIdx >= cols.length) continue;
-      cols[colIdx].push({ globalIdx: i, dateOffset: timeline.dateOffset[i] });
+      const d = timeline.dateOffset[i];
+      const p = timeline.paperIdx[i];
+      if (d > maxDate) maxDate = d;
+      let dm = byDate.get(d);
+      if (!dm) {
+        dm = new Map();
+        byDate.set(d, dm);
+      }
+      let list = dm.get(p);
+      if (!list) {
+        list = [];
+        dm.set(p, list);
+      }
+      list.push(i);
     }
-    for (const col of cols) col.sort((a, b) => a.dateOffset - b.dateOffset);
-    return cols;
-  }, [timeline, contentFilter]);
+    // Sort each paper's bucket so rendering is stable
+    for (const dm of byDate.values()) {
+      for (const list of dm.values()) list.sort((a, b) => a - b);
+    }
 
-  // Total visual stack height per column
-  const stackHeightsPx = useMemo(
-    () => columns.map((col) => col.length * chunkHeight),
-    [columns, chunkHeight]
-  );
+    const dates = Array.from(byDate.keys()).sort((a, b) => a - b);
+    const days: DayLayout[] = [];
+    let cursorY = 0;
+    for (const d of dates) {
+      const byPaper = byDate.get(d)!;
+      let maxN = 0;
+      for (const list of byPaper.values()) {
+        if (list.length > maxN) maxN = list.length;
+      }
+      const rowHeight = maxN * chunkHeight + DAY_PAD_PX;
+      days.push({ date: d, startY: cursorY, rowHeight, byPaper });
+      cursorY += rowHeight;
+    }
+    return { days, totalHeight: cursorY, maxDate };
+  }, [timeline, contentFilter, chunkHeight]);
 
-  // Resize the canvas to its CSS box, retina-aware
+  // Resize the canvas
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -97,46 +137,66 @@ export function TimelineMinimap({
     };
   }, []);
 
-  // Clamp scrollY whenever inputs change
-  const maxStackPx = useMemo(
-    () => Math.max(0, ...stackHeightsPx),
-    [stackHeightsPx]
-  );
-  const maxScroll = Math.max(0, maxStackPx - canvasSize.h);
+  const maxScroll = Math.max(0, layout.totalHeight - canvasSize.h);
 
   useEffect(() => {
     setScrollY((y) => Math.max(0, Math.min(y, maxScroll)));
   }, [maxScroll]);
 
-  // Wheel: pan vertical; Ctrl/Cmd+wheel = zoom
+  // Binary search the day at a virtual Y position
+  const findDayAtY = useCallback(
+    (yVirtual: number): number => {
+      const days = layout.days;
+      if (days.length === 0 || yVirtual < 0) return -1;
+      let lo = 0;
+      let hi = days.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const start = days[mid].startY;
+        const end = start + days[mid].rowHeight;
+        if (yVirtual < start) hi = mid - 1;
+        else if (yVirtual >= end) lo = mid + 1;
+        else return mid;
+      }
+      // Past the last day
+      return Math.min(lo, days.length - 1);
+    },
+    [layout]
+  );
+
+  // Wheel: pan / zoom with cursor focus preserved
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
-        // Zoom around the cursor's chunk
         const canvas = canvasRef.current;
         if (!canvas) return;
         const rect = canvas.getBoundingClientRect();
         const cursorY = e.clientY - rect.top;
-        const beforeIdx = (cursorY + scrollY) / chunkHeight;
+        const targetVirtualY = scrollY + cursorY;
+        // What fraction of the total height was the cursor at?
+        const fraction =
+          layout.totalHeight > 0 ? targetVirtualY / layout.totalHeight : 0;
         const dir = e.deltaY < 0 ? 1.15 : 1 / 1.15;
         const next = Math.max(
           MIN_CHUNK_HEIGHT,
           Math.min(MAX_CHUNK_HEIGHT, chunkHeight * dir)
         );
         setChunkHeight(next);
-        // Adjust scroll so cursor stays over the same chunk index
-        setScrollY(Math.max(0, beforeIdx * next - cursorY));
+        // After zoom, position cursor over the same fraction of corpus
+        // (we don't know newTotalHeight yet because the memo hasn't
+        // refired; estimate by scaling)
+        const scale = next / chunkHeight;
+        const newTotal = layout.totalHeight * scale;
+        setScrollY(Math.max(0, fraction * newTotal - cursorY));
       } else {
         setScrollY((y) => Math.max(0, Math.min(maxScroll, y + e.deltaY)));
       }
     },
-    [chunkHeight, scrollY, maxScroll]
+    [chunkHeight, scrollY, maxScroll, layout]
   );
 
-  // Click-and-drag panning. Listeners attached to `window` (not the
-  // canvas) so the drag survives the cursor leaving the canvas during
-  // a fast drag.
+  // Mouse drag — listeners on window so we don't lose track on canvas exit
   const dragState = useRef<{ startY: number; startScroll: number } | null>(null);
   const onMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -159,21 +219,29 @@ export function TimelineMinimap({
     [scrollY, maxScroll]
   );
 
-  // Hover lookup is O(1): map cursor → column, then column-index → globalIdx
+  // Hit-test the chunk at (x, y) on the canvas
   const indexAt = useCallback(
     (x: number, y: number): number | null => {
       if (canvasSize.w <= 0 || timeline.papers.length === 0) return null;
+      if (x < GUTTER_PX) return null;
       const usableW = canvasSize.w - GUTTER_PX;
       const colW = usableW / timeline.papers.length;
       const colIdx = Math.floor((x - GUTTER_PX) / colW);
-      if (colIdx < 0 || colIdx >= columns.length) return null;
-      const col = columns[colIdx];
-      if (col.length === 0) return null;
-      const localIdx = Math.floor((y + scrollY) / chunkHeight);
-      if (localIdx < 0 || localIdx >= col.length) return null;
-      return col[localIdx].globalIdx;
+      if (colIdx < 0 || colIdx >= timeline.papers.length) return null;
+
+      const yVirtual = y + scrollY;
+      const dayIdx = findDayAtY(yVirtual);
+      if (dayIdx < 0) return null;
+      const day = layout.days[dayIdx];
+      const yInDay = yVirtual - day.startY;
+      const chunkInDay = Math.floor(yInDay / chunkHeight);
+      const paperChunks = day.byPaper.get(colIdx);
+      if (!paperChunks || chunkInDay < 0 || chunkInDay >= paperChunks.length) {
+        return null;
+      }
+      return paperChunks[chunkInDay];
     },
-    [canvasSize.w, columns, chunkHeight, scrollY, timeline.papers.length]
+    [canvasSize.w, layout, timeline.papers.length, scrollY, chunkHeight, findDayAtY]
   );
 
   const onMouseMove = useCallback(
@@ -212,9 +280,7 @@ export function TimelineMinimap({
     [indexAt, onChunkClick]
   );
 
-  // Touch handlers — single-finger pan + tap-to-click + pinch-to-zoom.
-  // We track whether a touch moved enough to count as a drag; if not,
-  // a tap fires onChunkClick.
+  // Touch support
   const touchState = useRef<{
     startScroll: number;
     startY: number;
@@ -290,7 +356,6 @@ export function TimelineMinimap({
     (e: React.TouchEvent<HTMLCanvasElement>) => {
       const state = touchState.current;
       if (!state) return;
-      // Tap-to-click: only fire when finger didn't drag
       if (!state.moved && e.changedTouches.length === 1 && onChunkClick) {
         const t = e.changedTouches[0];
         const canvas = canvasRef.current;
@@ -305,9 +370,7 @@ export function TimelineMinimap({
     [indexAt, onChunkClick]
   );
 
-  // Drawing — rAF scheduled by useEffect; cancel in cleanup so we don't
-  // pile up frames. The effect's deps list is the closure over what the
-  // draw function actually uses.
+  // ---------- Draw ----------
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || canvasSize.w === 0 || canvasSize.h === 0) return;
@@ -317,7 +380,6 @@ export function TimelineMinimap({
     canvas.height = Math.floor(canvasSize.h * dpr);
     canvas.style.width = `${canvasSize.w}px`;
     canvas.style.height = `${canvasSize.h}px`;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -326,92 +388,123 @@ export function TimelineMinimap({
     const draw = () => {
       rafId = null;
       ctx.clearRect(0, 0, canvasSize.w, canvasSize.h);
-
-      // Background
       ctx.fillStyle = "#0f0f0f";
       ctx.fillRect(0, 0, canvasSize.w, canvasSize.h);
 
-      // Column dividers
+      const days = layout.days;
+      if (days.length === 0) return;
+
       const usableW = canvasSize.w - GUTTER_PX;
-      const colW = usableW / Math.max(1, timeline.papers.length);
+      const nPapers = Math.max(1, timeline.papers.length);
+      const colW = usableW / nPapers;
+
+      // Column dividers
       ctx.fillStyle = "#1a1a1a";
       for (let c = 1; c < timeline.papers.length; c++) {
         const x = GUTTER_PX + c * colW;
         ctx.fillRect(x - 0.5, 0, 1, canvasSize.h);
       }
 
-      // Per column, virtual-window through chunks visible in [0, h]
-      for (let c = 0; c < columns.length; c++) {
-        const col = columns[c];
-        if (col.length === 0) continue;
+      // Visible date range via binary search
+      const firstVisibleVirtual = scrollY;
+      const lastVisibleVirtual = scrollY + canvasSize.h;
+      // Find first day intersecting the viewport
+      let firstDay = 0;
+      let lo = 0;
+      let hi = days.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const end = days[mid].startY + days[mid].rowHeight;
+        if (end < firstVisibleVirtual) lo = mid + 1;
+        else hi = mid - 1;
+      }
+      firstDay = Math.max(0, lo);
 
-        // Binary search for the first visible row
-        let lo = 0;
-        let hi = col.length - 1;
-        const firstVisibleY = scrollY;
-        const lastVisibleY = scrollY + canvasSize.h;
-        const firstRow = Math.max(0, Math.floor(firstVisibleY / chunkHeight));
-        const lastRow = Math.min(
-          col.length - 1,
-          Math.ceil(lastVisibleY / chunkHeight)
-        );
-        // (using arithmetic instead of binary search since chunks within
-        // a column are densely packed at exactly chunkHeight)
-        lo = firstRow;
-        hi = lastRow;
+      const baseDate = new Date(minDate);
+      const MS = 24 * 60 * 60 * 1000;
 
-        const colXStart = GUTTER_PX + c * colW + COLUMN_PAD;
-        const colXEnd = GUTTER_PX + (c + 1) * colW - COLUMN_PAD;
-        const colWidth = Math.max(1, colXEnd - colXStart);
+      let lastLabelY = -1000;
+      const LABEL_MIN_GAP = 36;
 
-        for (let row = lo; row <= hi; row++) {
-          const entry = col[row];
-          const y = row * chunkHeight - scrollY;
-          if (y + chunkHeight < 0 || y > canvasSize.h) continue;
+      for (let dIdx = firstDay; dIdx < days.length; dIdx++) {
+        const day = days[dIdx];
+        if (day.startY > lastVisibleVirtual) break;
 
-          const i = entry.globalIdx;
-          const isHit = searchMatches?.has(i) ?? false;
+        const yTop = day.startY - scrollY;
 
-          if (isHit) {
-            // Gutter flare on the left edge of this column
-            ctx.fillStyle = "#FFA500";
-            const flareH = Math.max(2, chunkHeight + 2);
-            ctx.fillRect(GUTTER_PX + c * colW, y - 1, 4, flareH);
+        // Date axis label on the left gutter (sparse, not every day)
+        if (yTop > lastLabelY + LABEL_MIN_GAP && day.rowHeight > 0) {
+          ctx.fillStyle = "#666";
+          ctx.font = "9px ui-monospace, monospace";
+          const date = new Date(baseDate.getTime() + day.date * MS);
+          const label =
+            date.toUTCString().slice(8, 11) + " " + date.toUTCString().slice(5, 7);
+          ctx.fillText(label, 1, yTop + 8);
+          lastLabelY = yTop;
+        }
 
-            ctx.fillStyle = "#FFA500";
-            ctx.fillRect(colXStart, y, colWidth, Math.max(1, chunkHeight));
-          } else {
-            const label = clusterArr[i];
-            const [r, g, b] = clusterColor(label);
-            // Darken by 1 - quality so worse OCR appears as deeper gray
-            const q = timeline.quality[i] / 255;
-            const k = Math.max(0.2, Math.min(1, 0.4 + 0.6 * q));
-            ctx.fillStyle = `rgb(${Math.round(r * k)}, ${Math.round(g * k)}, ${Math.round(b * k)})`;
-            ctx.fillRect(colXStart, y, colWidth, Math.max(1, chunkHeight));
+        // Each paper column for this day
+        for (let p = 0; p < nPapers; p++) {
+          const chunks = day.byPaper.get(p);
+          if (!chunks || chunks.length === 0) continue;
+          const colXStart = GUTTER_PX + p * colW + COLUMN_PAD;
+          const colXEnd = GUTTER_PX + (p + 1) * colW - COLUMN_PAD;
+          const w = Math.max(2, colXEnd - colXStart);
+          for (let k = 0; k < chunks.length; k++) {
+            const y = yTop + k * chunkHeight;
+            if (y + chunkHeight < 0 || y > canvasSize.h) continue;
+            const i = chunks[k];
+            drawChunk(
+              ctx,
+              colXStart,
+              y,
+              w,
+              chunkHeight,
+              i,
+              clusterArr[i],
+              timeline.quality[i] / 255,
+              searchMatches?.has(i) ?? false
+            );
           }
         }
       }
 
       // Hover ring
       if (hoveredGlobalIdx !== null) {
-        const colIdx = timeline.paperIdx[hoveredGlobalIdx];
-        const col = columns[colIdx];
-        if (col) {
-          const localIdx = col.findIndex(
-            (e) => e.globalIdx === hoveredGlobalIdx
-          );
-          if (localIdx >= 0) {
-            const y = localIdx * chunkHeight - scrollY;
-            const colXStart = GUTTER_PX + colIdx * colW;
-            const colXEnd = GUTTER_PX + (colIdx + 1) * colW;
-            ctx.strokeStyle = "rgba(255,255,255,0.9)";
-            ctx.lineWidth = 1;
-            ctx.strokeRect(
-              colXStart + 0.5,
-              y - 0.5,
-              colXEnd - colXStart - 1,
-              Math.max(2, chunkHeight) + 1
-            );
+        const idx = hoveredGlobalIdx;
+        const d = timeline.dateOffset[idx];
+        const p = timeline.paperIdx[idx];
+        // find day in layout (linear search OK; the layout array is sorted by date)
+        let foundDay: DayLayout | null = null;
+        // small binary search by date
+        let lo2 = 0;
+        let hi2 = days.length - 1;
+        while (lo2 <= hi2) {
+          const mid = (lo2 + hi2) >> 1;
+          if (days[mid].date === d) {
+            foundDay = days[mid];
+            break;
+          }
+          if (days[mid].date < d) lo2 = mid + 1;
+          else hi2 = mid - 1;
+        }
+        if (foundDay) {
+          const list = foundDay.byPaper.get(p);
+          if (list) {
+            const k = list.indexOf(idx);
+            if (k >= 0) {
+              const y = foundDay.startY + k * chunkHeight - scrollY;
+              const colXStart = GUTTER_PX + p * colW;
+              const colXEnd = GUTTER_PX + (p + 1) * colW;
+              ctx.strokeStyle = "rgba(255,255,255,0.9)";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(
+                colXStart + 0.5,
+                y - 0.5,
+                colXEnd - colXStart - 1,
+                Math.max(2, chunkHeight) + 1
+              );
+            }
           }
         }
       }
@@ -423,13 +516,14 @@ export function TimelineMinimap({
     };
   }, [
     canvasSize,
-    columns,
+    layout,
     clusterArr,
     timeline,
     searchMatches,
     chunkHeight,
     scrollY,
     hoveredGlobalIdx,
+    minDate,
   ]);
 
   const hoveredChunkInfo = useMemo(() => {
@@ -493,7 +587,7 @@ export function TimelineMinimap({
           <div className="font-mono text-[10px] text-stone-400">
             {hoveredChunkInfo.date}
           </div>
-          <div className="truncate">{hoveredChunkInfo.paper}</div>
+          <div className="break-words">{hoveredChunkInfo.paper}</div>
           <div className="text-stone-500 text-[10px]">
             cluster #{hoveredChunkInfo.cluster} · OCR{" "}
             {Math.round(hoveredChunkInfo.quality * 100)}%
@@ -501,10 +595,83 @@ export function TimelineMinimap({
         </div>
       )}
 
-      {/* Interaction hint */}
       <div className="absolute bottom-1 left-1 text-[9px] text-stone-600 pointer-events-none">
         pinch zoom · drag pan · tap a bar
       </div>
     </div>
   );
+}
+
+// ---------------------- drawing primitives ----------------------
+
+function drawChunk(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  chunkIdx: number,
+  clusterLabel: number,
+  quality: number,
+  isHit: boolean,
+) {
+  const [r, g, b] = clusterColor(clusterLabel);
+  const baseColor = `rgb(${r}, ${g}, ${b})`;
+  const drawH = Math.max(1, h);
+
+  // 15% solid prefix, 70% middle morse pattern, 15% solid suffix.
+  const prefixEnd = x + w * 0.15;
+  const suffixStart = x + w * 0.85;
+  const middleW = suffixStart - prefixEnd;
+
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(x, y, prefixEnd - x, drawH);
+  ctx.fillRect(suffixStart, y, x + w - suffixStart, drawH);
+
+  // Middle: Morse-code-ish pattern. More gaps = worse OCR.
+  if (middleW > 0) {
+    const segW = middleW / MORSE_SEGMENTS;
+    for (let s = 0; s < MORSE_SEGMENTS; s++) {
+      const segStart = prefixEnd + s * segW;
+      const presenceRoll = noiseArr[(chunkIdx * 11 + s) % NOISE_LEN];
+      if (presenceRoll >= quality) continue;
+      // Dot vs dash
+      const isDash = noiseArr[(chunkIdx * 13 + s) % NOISE_LEN] > 0.45;
+      const segActualW = isDash ? segW * 0.85 : segW * 0.4;
+      const offset = (segW - segActualW) / 2;
+      ctx.fillRect(segStart + offset, y, segActualW, drawH);
+    }
+  }
+
+  if (isHit) {
+    ctx.fillStyle = "#FFA500";
+    // Gold caps at the very ends — 10% wide each. They overlay the
+    // cluster-colored solid prefix/suffix.
+    const capW = Math.max(1.5, w * SEARCH_CAP_FRAC);
+    ctx.fillRect(x, y, capW, drawH);
+    ctx.fillRect(x + w - capW, y, capW, drawH);
+
+    // Small inward-pointing arrows at the inner edges of the caps.
+    if (h >= 2 && w >= 12) {
+      const arrowH = Math.min(drawH, 6);
+      const arrowYTop = y + (drawH - arrowH) / 2;
+      const arrowYBot = arrowYTop + arrowH;
+      const arrowYMid = (arrowYTop + arrowYBot) / 2;
+      const arrowLen = Math.min(capW * 0.8, 3);
+      // Right-pointing arrow at the end of the left cap
+      ctx.beginPath();
+      ctx.moveTo(x + capW, arrowYTop);
+      ctx.lineTo(x + capW + arrowLen, arrowYMid);
+      ctx.lineTo(x + capW, arrowYBot);
+      ctx.closePath();
+      ctx.fill();
+      // Left-pointing arrow at the start of the right cap
+      ctx.beginPath();
+      ctx.moveTo(x + w - capW, arrowYTop);
+      ctx.lineTo(x + w - capW - arrowLen, arrowYMid);
+      ctx.lineTo(x + w - capW, arrowYBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
 }
