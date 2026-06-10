@@ -25,6 +25,13 @@ const DAY_PAD_PX = 0;        // optional padding between date rows
 const MORSE_SEGMENTS = 7;
 const SEARCH_CAP_FRAC = 0.10;
 
+// Inertia / momentum constants
+const WHEEL_GAIN = 1.6;             // amplify trackpad wheel
+const VELOCITY_SAMPLE_MS = 80;      // window for averaging touch velocity
+const FLING_FRICTION = 0.94;        // per-frame velocity decay (≈60fps)
+const FLING_MIN_SPEED = 0.05;       // px/ms — below this we stop the rAF
+const FLING_MAX_SPEED = 4.5;        // px/ms cap so a furious flick doesn't shoot to the end
+
 // Deterministic pseudo-random noise table so the Morse pattern is
 // stable across redraws but varies per (chunk, segment).
 const NOISE_LEN = 1024;
@@ -164,10 +171,55 @@ export function TimelineMinimap({
     [layout]
   );
 
+  // Fling/inertia state. Velocity is px/ms (positive = scrolling down).
+  const flingRafRef = useRef<number | null>(null);
+  const flingVelocityRef = useRef<number>(0);
+  const maxScrollRef = useRef<number>(0);
+  maxScrollRef.current = maxScroll;
+
+  const stopFling = useCallback(() => {
+    if (flingRafRef.current !== null) {
+      cancelAnimationFrame(flingRafRef.current);
+      flingRafRef.current = null;
+    }
+    flingVelocityRef.current = 0;
+  }, []);
+
+  const startFling = useCallback((initialV: number) => {
+    if (Math.abs(initialV) < FLING_MIN_SPEED) return;
+    const capped = Math.max(-FLING_MAX_SPEED, Math.min(FLING_MAX_SPEED, initialV));
+    flingVelocityRef.current = capped;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.max(1, now - last);
+      last = now;
+      // 60fps-relative decay so trackpad jitter doesn't change feel
+      const decay = Math.pow(FLING_FRICTION, dt / 16.67);
+      flingVelocityRef.current *= decay;
+      const v = flingVelocityRef.current;
+      setScrollY((y) => {
+        const next = y + v * dt;
+        if (next <= 0 || next >= maxScrollRef.current) {
+          flingVelocityRef.current = 0;
+        }
+        return Math.max(0, Math.min(maxScrollRef.current, next));
+      });
+      if (Math.abs(flingVelocityRef.current) < FLING_MIN_SPEED) {
+        flingRafRef.current = null;
+        return;
+      }
+      flingRafRef.current = requestAnimationFrame(tick);
+    };
+    flingRafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  useEffect(() => () => stopFling(), [stopFling]);
+
   // Wheel: pan / zoom with cursor focus preserved
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
       e.preventDefault();
+      stopFling();
       if (e.ctrlKey || e.metaKey) {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -190,33 +242,64 @@ export function TimelineMinimap({
         const newTotal = layout.totalHeight * scale;
         setScrollY(Math.max(0, fraction * newTotal - cursorY));
       } else {
-        setScrollY((y) => Math.max(0, Math.min(maxScroll, y + e.deltaY)));
+        setScrollY((y) =>
+          Math.max(0, Math.min(maxScroll, y + e.deltaY * WHEEL_GAIN))
+        );
       }
     },
-    [chunkHeight, scrollY, maxScroll, layout]
+    [chunkHeight, scrollY, maxScroll, layout, stopFling]
   );
 
-  // Mouse drag — listeners on window so we don't lose track on canvas exit
-  const dragState = useRef<{ startY: number; startScroll: number } | null>(null);
+  // Mouse drag — listeners on window so we don't lose track on canvas exit.
+  // Tracks recent velocity samples so releasing the mouse mid-flick continues
+  // the scroll under inertia, matching the touch behaviour.
+  const dragState = useRef<{
+    startY: number;
+    startScroll: number;
+    samples: { t: number; y: number }[];
+  } | null>(null);
   const onMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      dragState.current = { startY: e.clientY, startScroll: scrollY };
+      stopFling();
+      dragState.current = {
+        startY: e.clientY,
+        startScroll: scrollY,
+        samples: [{ t: performance.now(), y: e.clientY }],
+      };
       const onMove = (ev: MouseEvent) => {
-        if (!dragState.current) return;
-        const dy = dragState.current.startY - ev.clientY;
+        const ds = dragState.current;
+        if (!ds) return;
+        const dy = ds.startY - ev.clientY;
         setScrollY(
-          Math.max(0, Math.min(maxScroll, dragState.current.startScroll + dy))
+          Math.max(0, Math.min(maxScrollRef.current, ds.startScroll + dy))
         );
+        const now = performance.now();
+        ds.samples.push({ t: now, y: ev.clientY });
+        const cutoff = now - VELOCITY_SAMPLE_MS;
+        while (ds.samples.length > 2 && ds.samples[0].t < cutoff) {
+          ds.samples.shift();
+        }
       };
       const onUp = () => {
+        const ds = dragState.current;
         dragState.current = null;
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
+        if (ds && ds.samples.length >= 2) {
+          const first = ds.samples[0];
+          const last = ds.samples[ds.samples.length - 1];
+          const dt = last.t - first.t;
+          if (dt > 0) {
+            // Velocity in screen-Y px/ms; scroll moves opposite (drag down → scroll up)
+            const screenV = (last.y - first.y) / dt;
+            startFling(-screenV);
+          }
+        }
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [scrollY, maxScroll]
+    [scrollY, stopFling, startFling]
   );
 
   // Hit-test the chunk at (x, y) on the canvas
@@ -288,10 +371,13 @@ export function TimelineMinimap({
     moved: boolean;
     pinchStartDist: number | null;
     pinchStartChunkHeight: number;
+    samples: { t: number; y: number }[];
   } | null>(null);
 
   const onTouchStart = useCallback(
     (e: React.TouchEvent<HTMLCanvasElement>) => {
+      stopFling();
+      const now = performance.now();
       if (e.touches.length === 1) {
         const t = e.touches[0];
         touchState.current = {
@@ -301,6 +387,7 @@ export function TimelineMinimap({
           moved: false,
           pinchStartDist: null,
           pinchStartChunkHeight: chunkHeight,
+          samples: [{ t: now, y: t.clientY }],
         };
       } else if (e.touches.length === 2) {
         const [a, b] = [e.touches[0], e.touches[1]];
@@ -314,10 +401,11 @@ export function TimelineMinimap({
           moved: true,
           pinchStartDist: dist,
           pinchStartChunkHeight: chunkHeight,
+          samples: [],
         };
       }
     },
-    [scrollY, chunkHeight]
+    [scrollY, chunkHeight, stopFling]
   );
 
   const onTouchMove = useCallback(
@@ -347,6 +435,12 @@ export function TimelineMinimap({
         setScrollY(
           Math.max(0, Math.min(maxScroll, state.startScroll + dy))
         );
+        const now = performance.now();
+        state.samples.push({ t: now, y: t.clientY });
+        const cutoff = now - VELOCITY_SAMPLE_MS;
+        while (state.samples.length > 2 && state.samples[0].t < cutoff) {
+          state.samples.shift();
+        }
       }
     },
     [maxScroll]
@@ -364,10 +458,19 @@ export function TimelineMinimap({
           const idx = indexAt(t.clientX - rect.left, t.clientY - rect.top);
           if (idx !== null) onChunkClick(idx);
         }
+      } else if (state.moved && state.samples.length >= 2) {
+        // Toss inertia from the last ~80ms of touch movement.
+        const first = state.samples[0];
+        const last = state.samples[state.samples.length - 1];
+        const dt = last.t - first.t;
+        if (dt > 0) {
+          const screenV = (last.y - first.y) / dt;
+          startFling(-screenV);
+        }
       }
       touchState.current = null;
     },
-    [indexAt, onChunkClick]
+    [indexAt, onChunkClick, startFling]
   );
 
   // ---------- Draw ----------
