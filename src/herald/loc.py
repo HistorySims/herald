@@ -63,6 +63,19 @@ class PaperMetadata:
     end_year: int | None
 
 
+class LOCBlocked(RuntimeError):
+    """LOC returned a rate-limit (429) or a Cloudflare/CAPTCHA HTML page.
+
+    Per LOC's docs, a block from exceeding their rate clears in 1 hour;
+    repeated retries during the block extend it. Raising this immediately
+    lets the orchestrator stop the run instead of hammering.
+    """
+
+    def __init__(self, message: str, *, retry_after_secs: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_secs = retry_after_secs
+
+
 @dataclass(frozen=True)
 class IssueRef:
     lccn: str
@@ -403,7 +416,20 @@ class LOCClient:
 
         LOC's search endpoint occasionally closes the connection mid-body
         (RemoteProtocolError); we also retry read timeouts and 5xx.
-        4xx is non-retryable.
+
+        Two responses get a hard stop instead of a retry, both raising
+        ``LOCBlocked``:
+
+        * **429 Too Many Requests** — LOC's block clears in ~1 hour
+          wall-clock per their docs, and retrying inside that window
+          extends the block. The orchestrator should kill the run, not
+          loop.
+        * **HTML body when JSON was requested** — Cloudflare bot
+          interstitials come back as 200 with ``text/html``. Same hard
+          stop: the body has no useful data and continuing to request
+          just deepens whatever fingerprint Cloudflare matched on.
+
+        4xx other than 429 is non-retryable and returned to the caller.
         """
         url = path if path.startswith("http") else f"{self._base}{path}"
         delay = self._retry_base_delay
@@ -425,23 +451,29 @@ class LOCClient:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if resp.status_code == 429 or resp.status_code >= 500:
+            if resp.status_code == 429:
+                ra = resp.headers.get("retry-after")
+                retry_after = int(ra) if ra and ra.isdigit() else None
+                raise LOCBlocked(
+                    f"LOC returned 429 for {url}; cool-off ~1 hour. "
+                    f"Stopping rather than retrying — repeated requests "
+                    f"during the block extend it.",
+                    retry_after_secs=retry_after,
+                )
+            if _looks_like_html_interstitial(resp):
+                raise LOCBlocked(
+                    f"LOC returned an HTML body (likely Cloudflare bot "
+                    f"challenge) for {url} when JSON was requested. "
+                    f"Stopping rather than retrying."
+                )
+            if resp.status_code >= 500:
                 last = httpx.HTTPStatusError(
                     f"loc {resp.status_code}", request=resp.request, response=resp,
                 )
                 if attempt >= self._max_retries:
                     raise last
-                ra = resp.headers.get("retry-after")
-                if ra and ra.isdigit():
-                    # Honor LOC's hint, with a 1s floor.
-                    await asyncio.sleep(max(int(ra), 1))
-                else:
-                    # 429 means "really back off" — pad significantly more
-                    # than for 5xx. The cool-off lets LOC's per-minute
-                    # window roll over.
-                    pad = self._rate_limit_pad if resp.status_code == 429 else 0.0
-                    await asyncio.sleep(delay + pad)
-                    delay *= 2
+                await asyncio.sleep(delay)
+                delay *= 2
                 continue
             return resp
         # Loop always returns or raises; unreachable.
@@ -459,6 +491,24 @@ class LOCClient:
 
 
 # ---- helpers --------------------------------------------------------
+
+
+def _looks_like_html_interstitial(resp: httpx.Response) -> bool:
+    """Detect Cloudflare/CAPTCHA HTML when we asked for JSON.
+
+    LOC's JSON endpoints normally return ``application/json``. A bot
+    challenge comes back with HTML — sometimes 200 OK, sometimes 403,
+    sometimes 503. ``Content-Type`` starting with ``text/html`` is the
+    cheap and reliable signal; we don't need to parse the body.
+
+    Skips the check on responses we never asked JSON for (e.g.
+    ``fulltext_service`` endpoints that return ALTO XML or plain text).
+    Those have an ``application/xml``, ``application/alto+xml``, or
+    ``text/plain`` content-type, not ``text/html``.
+    """
+    ct = (resp.headers.get("content-type") or "").lower()
+    return ct.startswith("text/html")
+
 
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 

@@ -8,7 +8,7 @@ from datetime import date
 import httpx
 import pytest
 
-from herald.loc import LOCClient, PageRef
+from herald.loc import LOCBlocked, LOCClient, PageRef
 
 
 def _client() -> LOCClient:
@@ -195,20 +195,41 @@ async def test_500_at_resource_endpoint_retries_then_raises(httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_429_at_resource_endpoint_retries_then_succeeds(httpx_mock):
-    httpx_mock.add_response(url=_issue_url("1845-08-09"), status_code=429)
+async def test_429_raises_blocked_without_retry(httpx_mock):
+    """A 429 must hard-stop, not retry. LOC's block clears in ~1 hour;
+    retrying during the window extends it."""
     httpx_mock.add_response(
         url=_issue_url("1845-08-09"),
-        json=_resources_response([1], "1845-08-09"),
+        status_code=429,
+        headers={"retry-after": "120"},
     )
     async with _client() as loc:
-        out = [
-            pair async for pair in loc.iter_issues_with_pages(
+        with pytest.raises(LOCBlocked) as excinfo:
+            async for _ in loc.iter_issues_with_pages(
                 "sn83030213",
                 date_from=date(1845, 8, 9), date_to=date(1845, 8, 9),
-            )
-        ]
-    assert len(out) == 1
+            ):
+                pass
+    assert excinfo.value.retry_after_secs == 120
+
+
+@pytest.mark.asyncio
+async def test_html_interstitial_raises_blocked(httpx_mock):
+    """An HTML body when JSON was requested means Cloudflare/CAPTCHA;
+    same hard-stop behavior as 429."""
+    httpx_mock.add_response(
+        url=_issue_url("1845-08-09"),
+        status_code=200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        content=b"<html><body>Just a moment...</body></html>",
+    )
+    async with _client() as loc:
+        with pytest.raises(LOCBlocked):
+            async for _ in loc.iter_issues_with_pages(
+                "sn83030213",
+                date_from=date(1845, 8, 9), date_to=date(1845, 8, 9),
+            ):
+                pass
 
 
 # ---- fetch_ocr ------------------------------------------------------
