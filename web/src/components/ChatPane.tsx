@@ -293,6 +293,13 @@ export function ChatPane({
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           <a
+            href="/brief"
+            className="text-xs text-stone-400 hover:text-stone-600 transition-colors
+              border border-stone-300 rounded px-2 py-1"
+          >
+            Brief
+          </a>
+          <a
             href="/explore"
             className="text-xs text-stone-400 hover:text-stone-600 transition-colors
               border border-stone-300 rounded px-2 py-1"
