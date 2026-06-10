@@ -115,7 +115,14 @@ def _load_chunk_rows(
     conn: psycopg.Connection,
     run_id: UUID,
 ) -> list[tuple[np.ndarray, date, int, int, int, int]]:
-    """Returns list of (embedding, date_issued, t0, t1, t2, t3)."""
+    """Returns list of (embedding, date_issued, t0, t1, t2, t3).
+
+    Filtered to active (non-quarantined) chunks with content_type=0
+    (i.e. drops OCR-garbage clusters and ad/legal-dominated bins). This
+    is the correct denominator for "what was this cluster about and how
+    did it move", since the corpus already considers the other content
+    types non-substantive.
+    """
     rows: list[tuple[np.ndarray, date, int, int, int, int]] = []
     with conn.cursor(name="drift_load_chunks") as cur:
         cur.itersize = 5000
@@ -133,6 +140,8 @@ def _load_chunk_rows(
             JOIN issues ON issues.id = pages.issue_id
             WHERE chunk_projections.run_id = %s
               AND chunks.embedding IS NOT NULL
+              AND chunks.status = 'active'
+              AND chunk_projections.content_type = 0
             """,
             (run_id,),
         )
@@ -203,7 +212,16 @@ def _drift_for_member_embeddings(
     embeddings: list[np.ndarray],
     dates: list[date],
 ) -> dict:
-    """Bin by ISO week, return drift metrics."""
+    """Bin by ISO week, return drift metrics.
+
+    Three metrics:
+      cum: sum of consecutive-week cosine distances (path length)
+      net: cosine distance from first-week to last-week centroid
+      ratio = net / cum: in [0, 1] by triangle inequality. High = the
+        story is moving in a coherent direction. Low = random walk
+        (rotating content with no net displacement, e.g. police-blotter
+        cluster where each week is a different incident).
+    """
     by_week: dict[tuple[int, int], list[np.ndarray]] = defaultdict(list)
     for emb, d in zip(embeddings, dates):
         by_week[_iso_week_key(d)].append(emb)
@@ -213,6 +231,7 @@ def _drift_for_member_embeddings(
             "weeks": len(by_week),
             "cumulative": None,
             "net": None,
+            "ratio": None,
             "n_chunks": len(embeddings),
         }
 
@@ -223,13 +242,22 @@ def _drift_for_member_embeddings(
     for i in range(1, len(centroids)):
         cumulative += _cosine_distance(centroids[i - 1], centroids[i])
     net = _cosine_distance(centroids[0], centroids[-1])
+    ratio = _safe_ratio(net, cumulative)
 
     return {
         "weeks": len(sorted_weeks),
         "cumulative": cumulative,
         "net": net,
+        "ratio": ratio,
         "n_chunks": len(embeddings),
     }
+
+
+def _safe_ratio(net: float, cum: float) -> float | None:
+    """net / cum, capped at 1.0 for numerical safety, None when cum≈0."""
+    if cum is None or cum <= 1e-9:
+        return None
+    return min(1.0, net / cum)
 
 
 def _compute_drift_per_cluster(
@@ -310,13 +338,17 @@ def _write_report(
     lines.append(f"Active run: `{run_id}`")
     lines.append("")
     lines.append(
-        "For each cluster we bin member chunks by ISO week, compute "
-        "the centroid per week, then report:"
+        "Members are filtered to `chunks.status='active'` AND "
+        "`content_type=0` (drops quarantined OCR-garbage and ad/legal "
+        "chunks). For each cluster we bin its members by ISO week, "
+        "compute the centroid per week, then report:"
     )
     lines.append("")
-    lines.append("- **cum**: sum of cosine distances between consecutive weekly centroids")
-    lines.append("- **net**: cosine distance from first-week centroid to last-week centroid")
-    lines.append("- **weeks**: number of ISO weeks with ≥1 member chunk")
+    lines.append("- **cum**: sum of cosine distances between consecutive weekly centroids (path length)")
+    lines.append("- **net**: cosine distance from first-week centroid to last-week centroid (displacement)")
+    lines.append("- **ratio**: net / cum, in [0, 1]. High = directional evolution; low = random walk (rotating content with no net displacement)")
+    lines.append("- **n**: active+content chunks contributing to the centroids")
+    lines.append("- **weeks**: number of ISO weeks with ≥1 such chunk")
     lines.append("")
 
     # --- Highlights ---
@@ -328,14 +360,14 @@ def _write_report(
         lines.append("_No clusters matched the highlight patterns._")
         lines.append("")
     else:
-        lines.append("| tier | size | label | weeks | cum | net | matched |")
-        lines.append("| ---: | ---: | --- | ---: | ---: | ---: | --- |")
+        lines.append("| tier | n | label | weeks | cum | net | ratio | matched |")
+        lines.append("| ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |")
         for c in highlights:
             m = metrics.get((c["tier"], c["label"]), {})
             lines.append(_format_row(c, m))
         lines.append("")
 
-    # --- Per-tier extremes ---
+    # --- Per-tier rankings: net displacement vs net/cum ratio ---
     by_tier: dict[int, list[dict]] = defaultdict(list)
     for c in clusters:
         by_tier[c["tier"]].append(c)
@@ -345,29 +377,40 @@ def _write_report(
         scored: list[tuple[dict, dict]] = [
             (c, metrics.get((c["tier"], c["label"]), {})) for c in rows
         ]
+        # Eligibility: ≥30 active+content chunks contributed to drift (not stored size).
         scored = [
             (c, m) for c, m in scored
-            if m.get("cumulative") is not None and c["size"] >= 30
+            if m.get("cumulative") is not None
+            and m.get("n_chunks", 0) >= 30
         ]
         if not scored:
             continue
-        lines.append(f"## Tier {tier} — drift extremes (size ≥ 30)")
+        lines.append(f"## Tier {tier} — directional evolution (active+content, n ≥ 30)")
+        lines.append("")
+        lines.append(
+            "_Read side by side: clusters that top BOTH lists are genuinely "
+            "evolving (Voorhees/Mexico shape). High net but low ratio is "
+            "churn (police-blotter/markets — rotating content, no coherent "
+            "direction)._"
+        )
         lines.append("")
 
-        scored.sort(key=lambda cm: -(cm[1]["cumulative"] or 0))
-        lines.append("### Highest cumulative drift (story is evolving)")
+        by_net = sorted(scored, key=lambda cm: -(cm[1]["net"] or 0))[:15]
+        by_ratio = sorted(scored, key=lambda cm: -(cm[1].get("ratio") or 0))[:15]
+
+        lines.append("### Top 15 by net displacement")
         lines.append("")
-        lines.append("| size | label | weeks | cum | net |")
-        lines.append("| ---: | --- | ---: | ---: | ---: |")
-        for c, m in scored[:10]:
+        lines.append("| n | label | weeks | cum | net | ratio |")
+        lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
+        for c, m in by_net:
             lines.append(_format_row(c, m, include_tier=False, include_match=False))
         lines.append("")
 
-        lines.append("### Lowest cumulative drift (semantically static)")
+        lines.append("### Top 15 by net/cum ratio (directionality)")
         lines.append("")
-        lines.append("| size | label | weeks | cum | net |")
-        lines.append("| ---: | --- | ---: | ---: | ---: |")
-        for c, m in scored[-10:]:
+        lines.append("| n | label | weeks | cum | net | ratio |")
+        lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
+        for c, m in by_ratio:
             lines.append(_format_row(c, m, include_tier=False, include_match=False))
         lines.append("")
 
@@ -382,15 +425,18 @@ def _format_row(
 ) -> str:
     label = c["label_text"] or f"_(no label, id #{c['label']})_"
     weeks = m.get("weeks", 0)
+    n = m.get("n_chunks", 0)
     cum = m.get("cumulative")
     net = m.get("net")
+    ratio = m.get("ratio")
     cum_s = f"{cum:.3f}" if cum is not None else "—"
     net_s = f"{net:.3f}" if net is not None else "—"
+    ratio_s = f"{ratio:.2f}" if ratio is not None else "—"
 
     cells = []
     if include_tier:
         cells.append(str(c["tier"]))
-    cells.extend([f"{c['size']:,}", label, str(weeks), cum_s, net_s])
+    cells.extend([f"{n:,}", label, str(weeks), cum_s, net_s, ratio_s])
     if include_match:
         cells.append(_matches_highlight(c["label_text"]) or "")
     return "| " + " | ".join(cells) + " |"
