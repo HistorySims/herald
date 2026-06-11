@@ -347,12 +347,18 @@ export default function ExplorePage() {
           searchMatches={searchMatches}
           onPointClick={handlePointClick}
         />
-        <div className="absolute top-3 left-3">
+        <div className="absolute top-3 left-3 flex gap-1">
           <a
             href="/"
             className="text-xs text-stone-400 hover:text-stone-200 bg-stone-800/80 px-2 py-1 rounded"
           >
-            Back to search
+            Chat
+          </a>
+          <a
+            href="/brief"
+            className="text-xs text-stone-400 hover:text-stone-200 bg-stone-800/80 px-2 py-1 rounded"
+          >
+            Brief
           </a>
         </div>
         <div className="absolute top-3 right-3 text-xs text-stone-500 bg-stone-800/80 px-2 py-1 rounded">

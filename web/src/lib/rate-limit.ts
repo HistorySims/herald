@@ -66,5 +66,6 @@ export function jsonError(message: string, status: number): Response {
 // Define standard buckets. Each endpoint imports + uses these.
 defineBucket("ask", 60_000, 10);           // expensive: Sonnet synthesis
 defineBucket("cluster-story", 60_000, 15); // also Sonnet, but cached after first hit
+defineBucket("brief", 60_000, 6);          // most expensive: Haiku + Sonnet + Voyage + heavy DB
 defineBucket("search", 60_000, 60);        // cheap: just Postgres FTS
 defineBucket("explore-read", 60_000, 120); // very cheap reads

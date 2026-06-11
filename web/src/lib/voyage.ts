@@ -47,6 +47,21 @@ export async function embedQuery(text: string): Promise<number[]> {
   return data.data[0].embedding;
 }
 
+export async function embedQueries(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const resp = await voyageFetch("/embeddings", {
+    model: EMBED_MODEL,
+    input: texts,
+    input_type: "query",
+    output_dimension: EMBED_DIMS,
+  });
+  if (!resp.ok) {
+    throw new Error(`Voyage embed failed: ${resp.status} ${await resp.text()}`);
+  }
+  const data = await resp.json();
+  return (data.data as { embedding: number[] }[]).map((d) => d.embedding);
+}
+
 export async function rerank(
   query: string,
   documents: string[],
