@@ -162,6 +162,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // The pipeline makes several external calls (Haiku, Voyage, Supabase,
+  // Sonnet), any of which can throw. Without this catch a failure
+  // returns a bodyless 500 and the UI can only render "Unknown error".
+  try {
+    return await generateBrief(question);
+  } catch (err) {
+    console.error("brief generation failed:", err);
+    const message = err instanceof Error ? err.message : "Internal error";
+    return jsonError(message, 500);
+  }
+}
+
+async function generateBrief(question: string): Promise<Response> {
   const anthropic = getAnthropic();
   const supabase = getSupabase();
 
@@ -410,6 +423,17 @@ function uniqueShortPhrases(phrases: string[], cap: number): string[] {
   return out;
 }
 
+// Columns added by migration 0008. If that migration hasn't been
+// applied yet, PostgREST rejects the select — fall back to the legacy
+// column list and leave the active_* fields null (the matcher then
+// uses the original centroid/size, same as pre-quarantine behavior).
+const CLUSTER_COLS_BASE =
+  "id, tier, label, size, centroid, date_min, date_max, parent_id, label_text, " +
+  "drift_cumulative, drift_net, drift_weeks";
+const CLUSTER_COLS_ACTIVE =
+  CLUSTER_COLS_BASE +
+  ", active_size, active_centroid, burstiness, active_date_min, active_date_max";
+
 async function loadAllClusters(
   supabase: ReturnType<typeof getSupabase>,
   runId: string,
@@ -417,21 +441,37 @@ async function loadAllClusters(
   const out: (ClusterRow & { tier: number })[] = [];
   const pageSize = 500;
   let offset = 0;
+  let cols = CLUSTER_COLS_ACTIVE;
   while (true) {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("clusters")
-      .select(
-        "id, tier, label, size, centroid, date_min, date_max, parent_id, label_text, " +
-          "drift_cumulative, drift_net, drift_weeks, " +
-          "active_size, active_centroid, burstiness, active_date_min, active_date_max",
-      )
+      .select(cols)
       .eq("run_id", runId)
       .order("tier")
       .order("label")
       .range(offset, offset + pageSize - 1);
+    if (error && cols === CLUSTER_COLS_ACTIVE && offset === 0) {
+      cols = CLUSTER_COLS_BASE;
+      ({ data, error } = await supabase
+        .from("clusters")
+        .select(cols)
+        .eq("run_id", runId)
+        .order("tier")
+        .order("label")
+        .range(offset, offset + pageSize - 1));
+    }
     if (error) throw new Error(`load clusters: ${error.message}`);
     if (!data || data.length === 0) break;
-    out.push(...(data as unknown as (ClusterRow & { tier: number })[]));
+    for (const row of data as unknown as (ClusterRow & { tier: number })[]) {
+      out.push({
+        ...row,
+        active_size: row.active_size ?? null,
+        active_centroid: row.active_centroid ?? null,
+        burstiness: row.burstiness ?? null,
+        active_date_min: row.active_date_min ?? null,
+        active_date_max: row.active_date_max ?? null,
+      });
+    }
     if (data.length < pageSize) break;
     offset += pageSize;
   }
