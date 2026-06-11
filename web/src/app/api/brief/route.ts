@@ -31,10 +31,13 @@ import {
   cosineSimilarity,
   deriveShapeTag,
   isoWeekStart,
+  isRefusalLabel,
   MAX_EMBED_PHRASES,
   MAX_FTS_PHRASES,
   meanVector,
+  MIN_RELEVANCE_THRESHOLD,
   parseCentroid,
+  percentileRank,
   TOP_N_FINE,
   WEAK_RELEVANCE_THRESHOLD,
   type BriefResponse,
@@ -111,6 +114,15 @@ interface ClusterRow {
   drift_cumulative: number | null;
   drift_net: number | null;
   drift_weeks: number | null;
+  // Populated by scripts/cluster_recompute.py. When null the brief
+  // falls back to the original centroid / stored size, but those clusters
+  // are clearly pre-quarantine and unreliable — once recompute has run
+  // active_size > 0 is the eligibility gate.
+  active_size: number | null;
+  active_centroid: number[] | string | null;
+  burstiness: number | null;
+  active_date_min: string | null;
+  active_date_max: string | null;
 }
 
 interface FtsHit {
@@ -181,19 +193,66 @@ export async function POST(req: NextRequest) {
 
   // ---- 4. Load fine clusters + parents (all tiers) ----------------------
   const clusters = await loadAllClusters(supabase, runId);
-  const fineClusters = clusters.filter((c) => c.tier === 0);
   const clusterById = new Map<string, ClusterRow & { tier: number }>();
   for (const c of clusters) clusterById.set(c.id, c);
 
+  // Eligibility: a fine cluster contributes to matching only when
+  // active_size > 0 (or, if active_size hasn't been computed yet,
+  // when the original size > 0 — the recompute job populates it). A
+  // cluster whose every chunk is quarantined has nothing for a
+  // historian to read.
+  const fineClusters = clusters.filter(
+    (c) =>
+      c.tier === 0 &&
+      (c.active_size === null ? c.size > 0 : c.active_size > 0),
+  );
+
   // ---- 5. Centroid scoring on fine tier ---------------------------------
-  // cosine sim → in [-1, 1]; clamp to [0, 1] for combine.
+  // Prefer the recomputed active_centroid (mean over status='active'
+  // members only). Fall back to the original centroid when the
+  // recompute hasn't run yet. Cosine sim → in [-1, 1]; clamp to [0, 1].
   const semanticByLabel = new Map<number, number>();
   for (const c of fineClusters) {
-    const vec = parseCentroid(c.centroid);
+    const vec =
+      parseCentroid(c.active_centroid) ?? parseCentroid(c.centroid);
     if (!vec || vec.length !== queryVector.length) continue;
     const sim = cosineSimilarity(queryVector, vec);
     semanticByLabel.set(c.label, Math.max(0, sim));
   }
+
+  // Corpus percentile distributions for shape tagging. Computed once
+  // over the eligible fine-cluster population, then each card looks
+  // up its own percentile rank. This is what makes "top decile
+  // burstiness" never read as "moderate".
+  const burstDist: number[] = [];
+  const ratioDist: number[] = [];
+  const cumDist: number[] = [];
+  let corpusWeeks = 0;
+  for (const c of fineClusters) {
+    if (c.burstiness !== null && c.burstiness !== undefined) {
+      burstDist.push(c.burstiness);
+    }
+    if (
+      c.drift_cumulative !== null &&
+      c.drift_cumulative > 1e-9 &&
+      c.drift_net !== null
+    ) {
+      ratioDist.push(Math.min(1, c.drift_net / c.drift_cumulative));
+      cumDist.push(c.drift_cumulative);
+    }
+    if (c.drift_weeks && c.drift_weeks > corpusWeeks) {
+      corpusWeeks = c.drift_weeks;
+    }
+  }
+  burstDist.sort((a, b) => a - b);
+  ratioDist.sort((a, b) => a - b);
+  cumDist.sort((a, b) => a - b);
+  const corpusDist = {
+    burstSorted: burstDist,
+    ratioSorted: ratioDist,
+    cumSorted: cumDist,
+    corpusWeeks,
+  };
 
   // ---- 6. FTS scoring: count hits per fine cluster ----------------------
   const ftsPhrases = uniqueShortPhrases(
@@ -226,7 +285,12 @@ export async function POST(req: NextRequest) {
     };
   });
   scored.sort((a, b) => b.relevance - a.relevance);
-  const top = scored.slice(0, TOP_N_FINE);
+
+  // Drop everything below MIN_RELEVANCE_THRESHOLD. A finding aid that
+  // surfaces noise has failed at its job. The orientation's
+  // low-confidence branch still fires when even the top match is weak.
+  const eligible = scored.filter((s) => s.relevance >= MIN_RELEVANCE_THRESHOLD);
+  const top = eligible.slice(0, TOP_N_FINE);
 
   // ---- 8. Build cards ---------------------------------------------------
   const cards: ClusterCard[] = [];
@@ -239,7 +303,11 @@ export async function POST(req: NextRequest) {
       entry.relevance,
       entry.semantic_sim,
       entry.fts_hits,
+      corpusDist,
     );
+    // buildCard returns null when the cluster has zero active+content
+    // members in practice (belt-and-suspenders vs the active_size
+    // pre-filter; the recompute job might lag a fresh ingest).
     if (card) cards.push(card);
   }
 
@@ -353,7 +421,9 @@ async function loadAllClusters(
     const { data, error } = await supabase
       .from("clusters")
       .select(
-        "id, tier, label, size, centroid, date_min, date_max, parent_id, label_text, drift_cumulative, drift_net, drift_weeks",
+        "id, tier, label, size, centroid, date_min, date_max, parent_id, label_text, " +
+          "drift_cumulative, drift_net, drift_weeks, " +
+          "active_size, active_centroid, burstiness, active_date_min, active_date_max",
       )
       .eq("run_id", runId)
       .order("tier")
@@ -410,6 +480,13 @@ async function ftsHitsPerFineCluster(
   return counts;
 }
 
+interface CorpusDist {
+  burstSorted: number[];
+  ratioSorted: number[];
+  cumSorted: number[];
+  corpusWeeks: number;
+}
+
 async function buildCard(
   supabase: ReturnType<typeof getSupabase>,
   runId: string,
@@ -418,6 +495,7 @@ async function buildCard(
   relevance: number,
   semantic_sim: number,
   fts_hits: number,
+  corpusDist: CorpusDist,
 ): Promise<ClusterCard | null> {
   // Pull active+content_type=0 members for the card geometry. The
   // stored size includes all members; the card only counts the ones
@@ -447,6 +525,12 @@ async function buildCard(
     if (data.length < pageSize) break;
     offset += pageSize;
   }
+
+  // Drop the card entirely if the cluster has no active+content
+  // members. Belt-and-suspenders vs the active_size pre-filter — the
+  // recompute job might lag a fresh ingest, or the SQL filter might
+  // miss a quarantine status change between queries.
+  if (members.length === 0) return null;
 
   // Weekly counts (ISO week start, Monday).
   const weeklyMap = new Map<string, number>();
@@ -490,14 +574,31 @@ async function buildCard(
       : null;
   const weeks = weekly_counts.length;
 
-  const shape = deriveShapeTag(
-    burstiness,
-    drift_ratio,
-    cluster.drift_cumulative,
+  // Percentile-based shape tag. Compute this card's rank in the corpus
+  // distribution for each metric, then let deriveShapeTag use those
+  // ranks plus an absolute span check (heartbeat must span ≥40% of
+  // corpus weeks). Top decile of burstiness can no longer read as
+  // "moderate".
+  const burstiness_pct = percentileRank(burstiness, corpusDist.burstSorted);
+  const ratio_pct =
+    drift_ratio !== null ? percentileRank(drift_ratio, corpusDist.ratioSorted) : 0;
+  const cum_pct =
+    cluster.drift_cumulative !== null
+      ? percentileRank(cluster.drift_cumulative, corpusDist.cumSorted)
+      : 0;
+  const shape = deriveShapeTag({
+    burstiness_pct,
+    ratio_pct,
+    cum_pct,
     weeks,
-  );
+    corpus_weeks: corpusDist.corpusWeeks,
+  });
 
-  // Parent chain via parent_id.
+  // Parent chain via parent_id. Drop ancestors whose label is a
+  // Haiku refusal string — those strings ("I cannot reliably identify
+  // a shared topic..." etc.) are the model declining to label OCR
+  // garbage, not the cluster's actual theme. Render as null in the
+  // payload; the UI shows "(broad theme — unlabeled)" or skips them.
   const parent_chain: ParentEntry[] = [];
   let cursor: (ClusterRow & { tier: number }) | null = cluster;
   const seen = new Set<string>();
@@ -507,22 +608,37 @@ async function buildCard(
     const next: (ClusterRow & { tier: number }) | null =
       clusterById.get(cursor.parent_id) ?? null;
     if (!next) break;
+    const cleanLabel = isRefusalLabel(next.label_text) ? null : next.label_text;
     parent_chain.push({
       tier: next.tier,
       label: next.label,
-      label_text: next.label_text,
+      label_text: cleanLabel,
     });
     cursor = next;
   }
 
+  // Also scrub the card's own label of refusal strings. A refusal
+  // should never reach the page — render as null and let the UI use
+  // its unlabeled fallback.
+  const cleanedLabel = isRefusalLabel(cluster.label_text)
+    ? null
+    : cluster.label_text;
+
+  // Date range prefers active_date_min/max (recomputed from active
+  // members) — the stored date_min/max comes from the original
+  // cluster_run, which ran before quarantine and so still reflects
+  // chunks that have since been deleted (e.g. 1842 sample dates).
+  const date_min = cluster.active_date_min ?? cluster.date_min ?? "";
+  const date_max = cluster.active_date_max ?? cluster.date_max ?? "";
+
   return {
     tier: 0,
     label: cluster.label,
-    label_text: cluster.label_text,
+    label_text: cleanedLabel,
     size: cluster.size,
     active_size: members.length,
-    date_min: cluster.date_min ?? "",
-    date_max: cluster.date_max ?? "",
+    date_min,
+    date_max,
     peak_week,
     peak_count,
     burstiness,

@@ -136,7 +136,12 @@ def run_labels_only(
         conn.commit()
         log(f"Using active run {run_id}")
 
-        log("Loading chunks + projections...")
+        log("Loading chunks + projections (active + content_type=0 only)...")
+        # Filter to status='active' AND content_type=0 so the rep-chunk
+        # sampler doesn't draw from quarantined OCR garbage. Clusters
+        # that have no active members after this filter are skipped
+        # entirely — _build_label_items already enforces a min-size
+        # threshold and zero-active clusters fall below it.
         chunk_data: list[tuple[UUID, list[float], str, int, int, int, int]] = []
         with conn.cursor(name="load_for_labels") as cur:
             cur.itersize = 5000
@@ -147,6 +152,8 @@ def run_labels_only(
                 FROM chunk_projections cp
                 JOIN chunks ON chunks.id = cp.chunk_id
                 WHERE cp.run_id = %s
+                  AND chunks.status = 'active'
+                  AND cp.content_type = 0
                 ORDER BY cp.chunk_id
                 """,
                 (run_id,),

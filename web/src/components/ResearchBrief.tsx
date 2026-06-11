@@ -1,7 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
+import { isRefusalLabel } from "@/lib/brief";
 import type { BriefResponse, ClusterCard, WeeklyCount } from "@/lib/brief";
+
+function cleanLabel(label: string | null | undefined): string | null {
+  if (!label) return null;
+  if (isRefusalLabel(label)) return null;
+  return label;
+}
 
 interface Props {
   brief: BriefResponse;
@@ -100,6 +107,15 @@ function ChipRow({ label, items }: { label: string; items: string[] }) {
 }
 
 function ClusterCardView({ card, rank }: { card: ClusterCard; rank: number }) {
+  // Defensive label sanitization. The API already strips refusals,
+  // but if a new refusal pattern surfaces, we don't want it on the page.
+  const headerLabel =
+    cleanLabel(card.label_text) ?? `(unlabeled cluster #${card.label})`;
+  const cleanParents = card.parent_chain
+    .map((p) => ({
+      ...p,
+      display: cleanLabel(p.label_text) ?? "(broad theme — unlabeled)",
+    }));
   return (
     <div className="rounded border border-stone-200 bg-white shadow-sm p-4 space-y-3">
       <header className="flex items-start justify-between gap-3 flex-wrap">
@@ -107,14 +123,12 @@ function ClusterCardView({ card, rank }: { card: ClusterCard; rank: number }) {
           <div className="flex items-baseline gap-2">
             <span className="text-xs text-stone-400 font-mono">#{rank}</span>
             <h3 className="font-serif text-base text-stone-900 break-words">
-              {card.label_text ?? `(unlabeled cluster #${card.label})`}
+              {headerLabel}
             </h3>
           </div>
-          {card.parent_chain.length > 0 && (
+          {cleanParents.length > 0 && (
             <p className="text-xs text-stone-500 mt-0.5 break-words">
-              under: {card.parent_chain
-                .map((p) => p.label_text ?? `tier${p.tier}#${p.label}`)
-                .join(" › ")}
+              under: {cleanParents.map((p) => p.display).join(" › ")}
             </p>
           )}
         </div>
