@@ -39,7 +39,11 @@ export function ResearchBrief({ brief }: Props) {
         <ol className="space-y-4">
           {brief.cards.map((card, i) => (
             <li key={`${card.tier}-${card.label}`}>
-              <ClusterCardView card={card} rank={i + 1} />
+              <ClusterCardView
+                card={card}
+                rank={i + 1}
+                question={brief.translation.restated_question}
+              />
             </li>
           ))}
         </ol>
@@ -106,7 +110,15 @@ function ChipRow({ label, items }: { label: string; items: string[] }) {
   );
 }
 
-function ClusterCardView({ card, rank }: { card: ClusterCard; rank: number }) {
+function ClusterCardView({
+  card,
+  rank,
+  question,
+}: {
+  card: ClusterCard;
+  rank: number;
+  question: string;
+}) {
   // Defensive label sanitization. The API already strips refusals,
   // but if a new refusal pattern surfaces, we don't want it on the page.
   const headerLabel =
@@ -167,6 +179,12 @@ function ClusterCardView({ card, rank }: { card: ClusterCard; rank: number }) {
       )}
 
       <div className="pt-2 flex flex-wrap gap-3 text-xs">
+        <a
+          href={`/cluster/${card.cluster_id}?q=${encodeURIComponent(question)}`}
+          className="text-amber-700 hover:text-amber-900 underline font-medium"
+        >
+          → View cluster dossier
+        </a>
         <a
           href={`/?scope_tier=${card.tier}&scope_label=${card.label}`}
           className="text-amber-700 hover:text-amber-900 underline"

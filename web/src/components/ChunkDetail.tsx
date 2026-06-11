@@ -8,6 +8,7 @@ interface ChunkDetailProps {
   loading: boolean;
   tier: number;
   clusterLabel?: string | null;
+  dossierHref?: string | null;
   onAskClusterStory?: () => void;
   onClose: () => void;
 }
@@ -17,6 +18,7 @@ export function ChunkDetail({
   loading,
   tier,
   clusterLabel,
+  dossierHref,
   onAskClusterStory,
   onClose,
 }: ChunkDetailProps) {
@@ -76,6 +78,14 @@ export function ChunkDetail({
               >
                 → What&apos;s this cluster&apos;s story?
               </button>
+            )}
+            {dossierHref && !isOutlier && (
+              <a
+                href={dossierHref}
+                className="text-xs text-amber-400 hover:text-amber-300"
+              >
+                → View cluster dossier
+              </a>
             )}
             <a
               href={chunk.image_url}

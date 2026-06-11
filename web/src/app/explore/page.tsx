@@ -470,6 +470,16 @@ export default function ExplorePage() {
                     ?.label_text ?? null
                 : null
             }
+            dossierHref={
+              selectedChunk && selectedChunk.cluster_labels.length > tier
+                ? (() => {
+                    const info = clusterInfo.get(
+                      selectedChunk.cluster_labels[tier]
+                    );
+                    return info?.id ? `/cluster/${info.id}` : null;
+                  })()
+                : null
+            }
             onAskClusterStory={handleAskCurrentChunkCluster}
             onClose={() => {
               setSelectedChunk(null);

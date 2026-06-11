@@ -111,6 +111,7 @@ export function parseTimelineBinary(buffer: ArrayBuffer): TimelineData {
 }
 
 export interface ClusterInfo {
+  id: string;
   label: number;
   size: number;
   date_min: string | null;
