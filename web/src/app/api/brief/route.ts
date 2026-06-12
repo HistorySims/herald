@@ -672,6 +672,7 @@ async function buildCard(
   const date_max = cluster.active_date_max ?? cluster.date_max ?? "";
 
   return {
+    cluster_id: cluster.id,
     tier: 0,
     label: cluster.label,
     label_text: cleanedLabel,

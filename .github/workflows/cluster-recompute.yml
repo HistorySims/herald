@@ -40,6 +40,11 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: uv run scripts/cluster_recompute.py
 
+      - name: Populate cluster_weeks (dossier weekly aggregates)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: uv run scripts/cluster_weeks.py
+
       - name: Re-run Haiku cluster labels
         if: ${{ inputs.relabel == 'true' }}
         env:

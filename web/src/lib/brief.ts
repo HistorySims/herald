@@ -33,6 +33,7 @@ export interface WeeklyCount {
 }
 
 export interface ClusterCard {
+  cluster_id: string;        // clusters.id uuid — dossier route param
   tier: number;
   label: number;
   label_text: string | null;
