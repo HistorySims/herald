@@ -27,6 +27,10 @@ interface Props {
   driftRatio: number | null;
   weekIndex: number;
   onWeekChange: (i: number) => void;
+  // Called only when the user releases the scrubber, so the parent
+  // can scroll the evidence feed without yanking the anatomy off
+  // screen mid-drag.
+  onWeekCommit?: (i: number) => void;
 }
 
 export function ClusterAnatomy({
@@ -37,6 +41,7 @@ export function ClusterAnatomy({
   driftRatio,
   weekIndex,
   onWeekChange,
+  onWeekCommit,
 }: Props) {
   const n = weeks.length;
   const xAt = (i: number) =>
@@ -276,6 +281,15 @@ export function ClusterAnatomy({
           step={1}
           value={weekIndex}
           onChange={(e) => onWeekChange(parseInt(e.target.value, 10))}
+          onPointerUp={(e) =>
+            onWeekCommit?.(parseInt((e.target as HTMLInputElement).value, 10))
+          }
+          onTouchEnd={(e) =>
+            onWeekCommit?.(parseInt((e.target as HTMLInputElement).value, 10))
+          }
+          onKeyUp={(e) =>
+            onWeekCommit?.(parseInt((e.target as HTMLInputElement).value, 10))
+          }
           className="w-full accent-amber-400 touch-none h-8"
           aria-label="Scrub week"
         />
