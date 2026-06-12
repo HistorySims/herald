@@ -67,17 +67,25 @@ export default function ClusterDossierPage() {
     [],
   );
 
-  // Scrubber → feed: jump the feed to the scrubbed week's divider.
-  const handleWeekChange = useCallback(
+  // Scrubber → anatomy only. Dragging the slider should never scroll
+  // the page — that yanks the anatomy off screen mid-drag and you
+  // can't watch the story move. Stays on the index update.
+  const handleWeekChange = useCallback((i: number) => {
+    setWeekIndex(i);
+  }, []);
+
+  // On release, line the feed up with the chosen week so when the
+  // historian scrolls down to read, they're already on the right card.
+  // The scroll-spy guard suppresses the rebound during the smooth
+  // scroll.
+  const handleWeekCommit = useCallback(
     (i: number) => {
-      setWeekIndex(i);
-      lastScrubAt.current = Date.now();
       const wk = data?.weeks[i]?.week_start;
-      if (wk) {
-        weekEls.current
-          .get(wk)
-          ?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
+      if (!wk) return;
+      lastScrubAt.current = Date.now();
+      weekEls.current
+        .get(wk)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
     },
     [data],
   );
@@ -222,6 +230,7 @@ export default function ClusterDossierPage() {
             driftRatio={cluster.drift_ratio}
             weekIndex={Math.min(weekIndex, Math.max(0, data.weeks.length - 1))}
             onWeekChange={handleWeekChange}
+            onWeekCommit={handleWeekCommit}
           />
 
           <div className="pt-4">
