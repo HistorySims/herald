@@ -38,7 +38,18 @@ from herald import settings
 # --------------------- Tunable constants -------------------------------
 
 # A1 — gazetteer
-GAZETTEER_MIN_CHUNK_FREQ = 3       # token must hit ≥ N distinct active chunks
+# Single tokens are noisy at low frequencies (Checkpoint-1: "Bank",
+# "RIVER", "FROM" surfaced because they hit ≥3 chunks). Tighten:
+#   - exclude any single token whose lowercase is in the wordlist
+#     (entity ≈ "looks like a proper noun but isn't English vocab")
+#   - require a higher chunk-frequency floor for singles
+#   - require a minimum length and clean Capitalized/ALLCAPS shape
+#     so OCR artifacts like "THis", "Hank" don't slip in
+# Multi-word spans are unambiguous (e.g. "Smith Boughton") and stay
+# at the looser thresholds — these are rare-by-construction.
+GAZETTEER_MIN_CHUNK_FREQ_SINGLE = 5
+GAZETTEER_MIN_CHUNK_FREQ_MULTI = 3
+GAZETTEER_MIN_SINGLE_LEN = 5
 GAZETTEER_MAX_TOKEN_LEN = 32
 GAZETTEER_MIN_CAPITAL_LEN = 3
 GAZETTEER_MAX_ENTRIES = 50_000     # safety cap
@@ -65,11 +76,36 @@ GAP_DAY_WINDOW = 1                  # D-1 / D+1 (i.e. one-day gap)
 PROXIMITY_QUALITY_FLOOR = 0.10
 PROXIMITY_NEAREST_K = 3             # report nearest, score on top-1
 
-# A7 — composite (relevance_prior weighted blend)
+# A7 — composite
+# relevance_prior weighted blend:
 W_ENTITY = 0.35
 W_GRID = 0.20
 W_FOOTPRINT = 0.20
 W_PROXIMITY = 0.25
+# Recoverability now an additive term, not a multiplier. Checkpoint-1
+# showed the multiplicative form crushed every quarantined chunk —
+# quality ≈ 0.01–0.04 on this population zeroed the composite. Keep
+# quality as a tie-breaker the user can read in the breakdown.
+W_RECOVER = 0.10
+# Grid sign: clusters labeled with these substrings are treated as
+# non-substantive (ads, prices, schedules, legal notices). A regular
+# slot whose top label is commercial contributes NEGATIVELY to
+# relevance_prior — a dark chunk in the steamboat-schedule slot
+# should be deprioritized, not boosted. Editorial regular slots
+# contribute positively. Sub-threshold (irregular) slots contribute
+# zero, in either direction.
+COMMERCIAL_LABEL_KEYWORDS = (
+    "advertisement", "advertis",     # advertisements, advertising
+    "ad ",                            # standalone "ad" (with trailing space)
+    "price", "prices", "commodity", "market report",
+    "schedule", "rates",
+    "legal notice", "notice", "mortgage", "attachment", "foreclosure",
+    "debtor", "summons",
+    "retail", "sale ", "sales",
+    "testimonial", "patent medicine", "remedy", "remedies",
+    "insurance company",
+    "hotel",
+)
 
 # Diagnostic file knobs
 GRID_REPORT_TOP_N = 20
@@ -129,9 +165,18 @@ def main() -> None:
             print("Nothing quarantined — exiting.")
             return
 
+        print("Loading cluster labels (for commercial/editorial classification)...")
+        labels_by_t0 = _label_text_by_label(conn, run_id)
+        all_labels_by_t0 = _label_text_by_label(conn, run_id, include_refusals=True)
+        commercial_labels = classify_commercial(all_labels_by_t0)
+        print(f"  {len(labels_by_t0):,} labeled clusters; "
+              f"{len(commercial_labels):,} flagged commercial")
+
         print("A1 — building gazetteer from active text...")
-        gazetteer = build_gazetteer(active_chunks)
-        print(f"  {len(gazetteer):,} entries")
+        gazetteer = build_gazetteer(active_chunks, wordlist)
+        n_multi = sum(1 for v in gazetteer.values() if v["is_multiword"])
+        print(f"  {len(gazetteer):,} entries ({n_multi:,} multiword, "
+              f"{len(gazetteer) - n_multi:,} single)")
 
         print("A2 — extracting fragments from quarantined chunks...")
         fragments = extract_fragments(quarantined, wordlist)
@@ -149,10 +194,12 @@ def main() -> None:
         _write_matches(conn, matches)
 
         print("A4 — building layout grid from active chunks...")
-        slots, grid_violations = build_layout_grid(active_chunks)
+        slots, grid_violations = build_layout_grid(active_chunks, commercial_labels)
         regular = [s for s in slots.values() if s["top_label_share"] >= GRID_REGULAR_THRESHOLD
                    and s["sample_size"] >= GRID_MIN_SAMPLES_FOR_REGULAR]
-        print(f"  {len(slots):,} slots, {len(regular):,} regular")
+        n_commercial = sum(1 for s in regular if s.get("is_commercial"))
+        print(f"  {len(slots):,} slots, {len(regular):,} regular "
+              f"({n_commercial:,} commercial → negative sign)")
         _write_slots(conn, slots)
 
         print("A5 — computing cluster footprints and gap candidates...")
@@ -178,8 +225,9 @@ def main() -> None:
         _write_chunk_recovery(conn, per_chunk)
 
         print("Writing diagnostic files...")
-        labels_by_t0 = _label_text_by_label(conn, run_id)
-        write_grid_report(slots, grid_violations, active_chunks, labels_by_t0)
+        write_grid_report(
+            slots, grid_violations, active_chunks, labels_by_t0, commercial_labels,
+        )
         write_fuzzy_samples(conn, matches)
         write_top_candidates(per_chunk, quarantined, labels_by_t0)
         print("Done.")
@@ -390,10 +438,32 @@ MULTIWORD_RE = re.compile(
 )
 
 
-def build_gazetteer(chunks: list[ActiveChunk]) -> dict[str, dict]:
-    """Capitalized non-sentence-initial tokens hitting ≥ MIN distinct
-    chunks, plus multi-word spans (same min). Returns surface →
-    {freq, cluster_t0 set, is_multiword}."""
+_CAPITALIZED_RE = re.compile(r"[A-Z][a-z]+$")
+_ALLCAPS_RE = re.compile(r"[A-Z]+$")
+
+
+def _is_clean_single(surface: str) -> bool:
+    """Reject OCR-artifact case patterns like 'THis', 'FRom', 'Hank'.
+    Accept only proper-noun-shaped (`Capitalized`) or all-caps
+    surfaces (headline emphasis form)."""
+    return bool(_CAPITALIZED_RE.match(surface) or _ALLCAPS_RE.match(surface))
+
+
+def build_gazetteer(
+    chunks: list[ActiveChunk],
+    wordlist: set[str],
+) -> dict[str, dict]:
+    """Recurring proper-noun candidates from active text.
+
+    Single tokens: Capitalized non-sentence-initial; clean case shape;
+      lowercase NOT in the English wordlist; length ≥ MIN_SINGLE_LEN;
+      hits ≥ MIN_CHUNK_FREQ_SINGLE distinct active chunks.
+
+    Multi-word spans: kept at the looser MIN_CHUNK_FREQ_MULTI — these
+      are unambiguously entity-like by construction.
+
+    Returns surface → {freq, cluster_t0 list, is_multiword}.
+    """
     chunk_counts: dict[str, set[UUID]] = defaultdict(set)
     cluster_sets: dict[str, set[int]] = defaultdict(set)
     multiword_set: set[str] = set()
@@ -402,7 +472,7 @@ def build_gazetteer(chunks: list[ActiveChunk]) -> dict[str, dict]:
         content = ch.content
         if not content:
             continue
-        # Find sentence-initial positions (start of content, or after .!?)
+        # Sentence-initial positions: start of content, or after .!?\s+
         sent_inits = {0}
         for m in re.finditer(r"[.!?]\s+", content):
             sent_inits.add(m.end())
@@ -412,13 +482,12 @@ def build_gazetteer(chunks: list[ActiveChunk]) -> dict[str, dict]:
             tok = m.group(0)
             if len(tok) > GAZETTEER_MAX_TOKEN_LEN:
                 continue
-            # Skip if at a sentence-initial position
             if m.start() in sent_inits:
                 continue
             chunk_counts[tok].add(ch.id)
             cluster_sets[tok].add(ch.cluster_t0)
 
-        # Multi-word spans (always counted; almost never spurious)
+        # Multi-word spans (almost never spurious)
         for m in MULTIWORD_RE.finditer(content):
             span = re.sub(r"\s+", " ", m.group(0).strip())
             if len(span) > GAZETTEER_MAX_TOKEN_LEN * 2:
@@ -429,15 +498,27 @@ def build_gazetteer(chunks: list[ActiveChunk]) -> dict[str, dict]:
 
     gazetteer: dict[str, dict] = {}
     for surface, ids in chunk_counts.items():
-        if len(ids) < GAZETTEER_MIN_CHUNK_FREQ:
-            continue
+        is_multi = surface in multiword_set
+        if is_multi:
+            if len(ids) < GAZETTEER_MIN_CHUNK_FREQ_MULTI:
+                continue
+        else:
+            # Single-token quality gate: clean case, ≥ min length,
+            # not English vocab, and frequent enough.
+            if len(ids) < GAZETTEER_MIN_CHUNK_FREQ_SINGLE:
+                continue
+            if len(surface) < GAZETTEER_MIN_SINGLE_LEN:
+                continue
+            if not _is_clean_single(surface):
+                continue
+            if surface.lower() in wordlist:
+                continue
         gazetteer[surface] = {
             "freq": len(ids),
             "cluster_t0": sorted(cluster_sets[surface]),
-            "is_multiword": surface in multiword_set,
+            "is_multiword": is_multi,
         }
 
-    # Trim to top N by frequency if oversize.
     if len(gazetteer) > GAZETTEER_MAX_ENTRIES:
         top = sorted(gazetteer.items(), key=lambda kv: -kv[1]["freq"])[:GAZETTEER_MAX_ENTRIES]
         gazetteer = dict(top)
@@ -594,11 +675,18 @@ def fuzzy_match(
 
 def build_layout_grid(
     chunks: list[ActiveChunk],
+    commercial_labels: set[int],
 ) -> tuple[dict[tuple[UUID, int, int], dict], list[dict]]:
     """Per (paper_id, page_sequence, position_bucket) compute
-    cluster_t0 + content-type distributions over active chunks.
-    Returns (slots_dict, violation_days) — violations are days where
-    a chunk landed in a regular slot but its label disagreed."""
+    cluster_t0 distribution over active chunks. Slots that clear
+    GRID_REGULAR_THRESHOLD with ≥ GRID_MIN_SAMPLES_FOR_REGULAR get a
+    `signed_share`:
+      - commercial top label → NEGATIVE share (a quarantined chunk
+        landing here is almost certainly steamboat schedules or ads;
+        deprioritize as a recovery target).
+      - editorial top label  → POSITIVE share (boost).
+      - sub-threshold        → 0.
+    Returns (slots_dict, violation_days)."""
     by_slot: dict[tuple[UUID, int, int], list[int]] = defaultdict(list)
     by_slot_chunks: dict[tuple[UUID, int, int], list[ActiveChunk]] = defaultdict(list)
     for ch in chunks:
@@ -612,15 +700,31 @@ def build_layout_grid(
             continue
         counter = Counter(labels)
         top_label, top_count = counter.most_common(1)[0]
+        share = top_count / len(labels)
+        sample = len(labels)
+        is_regular = (
+            share >= GRID_REGULAR_THRESHOLD
+            and sample >= GRID_MIN_SAMPLES_FOR_REGULAR
+        )
+        is_commercial = int(top_label) in commercial_labels
+        if not is_regular:
+            signed_share = 0.0
+        elif is_commercial:
+            signed_share = -share
+        else:
+            signed_share = +share
         slots[key] = {
             "paper_id": key[0],
             "page_sequence": key[1],
             "position_bucket": key[2],
             "top_label": int(top_label),
-            "top_label_share": top_count / len(labels),
+            "top_label_share": share,
+            "signed_share": signed_share,
+            "is_commercial": is_commercial,
+            "is_regular": is_regular,
             "top_content_type": 0,  # we only loaded content_type=0
             "top_content_share": 1.0,
-            "sample_size": len(labels),
+            "sample_size": sample,
         }
 
     # Violations: chunks in regular slots whose own label != top.
@@ -789,15 +893,11 @@ def assemble_recovery(
             best_sim = None
             best_frag = None
 
-        # Grid component
+        # Grid component — signed contribution.
         slot = slots.get((q.paper_id, q.page_sequence, q.position_bucket))
-        if (
-            slot
-            and slot["top_label_share"] >= GRID_REGULAR_THRESHOLD
-            and slot["sample_size"] >= GRID_MIN_SAMPLES_FOR_REGULAR
-        ):
+        if slot and slot.get("is_regular"):
             grid_label = slot["top_label"]
-            grid_confidence = float(slot["top_label_share"])
+            grid_confidence = float(slot["signed_share"])  # +/- share
         else:
             grid_label = None
             grid_confidence = 0.0
@@ -834,6 +934,7 @@ def assemble_recovery(
             nearest_distance = None
             weighted_proximity = 0.0
 
+        # Grid contributes signed (commercial slots subtract).
         relevance_prior = (
             W_ENTITY * entity_score
             + W_GRID * grid_confidence
@@ -843,7 +944,12 @@ def assemble_recovery(
         recoverability = max(0.0, min(1.0, q.quality))
         gap_label = gaps.get(q.id)
         gap_bonus = GAP_BONUS if gap_label is not None else 1.0
-        recovery_value = relevance_prior * recoverability * gap_bonus
+        # Recoverability is ADDITIVE (not a multiplier) — Checkpoint-1
+        # showed the multiplicative form crushed every chunk on a
+        # population with q≈0.01–0.04. max(0, …) floor so a strongly
+        # negative grid signal can pull a hopeless candidate to zero
+        # without dragging the composite below.
+        recovery_value = max(0.0, relevance_prior + W_RECOVER * recoverability) * gap_bonus
 
         rows.append({
             "chunk_id": q.id,
@@ -1050,10 +1156,16 @@ def _lookup_paper_lccn_by_id(
 
 def _label_text_by_label(
     conn: psycopg.Connection, run_id: UUID,
+    include_refusals: bool = False,
 ) -> dict[int, str]:
     """For tier-0 clusters in the active run, return {label: label_text}.
-    Refusal strings are kept here — the diagnostic operator can see
-    them — but we collapse them to a placeholder."""
+
+    By default, drops refusal strings ("cannot reliably identify…") so
+    diagnostic tables stay readable. Pass include_refusals=True when
+    the consumer just wants substring lookup over every available
+    label (e.g. the commercial classifier needs to see every label
+    even if it was a refusal — though refusals never match commercial
+    keywords in practice)."""
     out: dict[int, str] = {}
     with conn.cursor() as cur:
         cur.execute(
@@ -1061,9 +1173,28 @@ def _label_text_by_label(
             (run_id,),
         )
         for label, text in cur:
-            if text and len(text) <= 120 and "cannot reliably" not in text.lower():
+            if not text:
+                continue
+            if include_refusals:
+                out[int(label)] = text
+                continue
+            if len(text) <= 120 and "cannot reliably" not in text.lower():
                 out[int(label)] = text
     conn.commit()
+    return out
+
+
+def classify_commercial(labels: dict[int, str]) -> set[int]:
+    """Flag clusters whose label_text contains any COMMERCIAL_LABEL_KEYWORDS
+    substring. Heuristic — unlabeled clusters default to non-commercial,
+    which is the safe (don't deprioritize) default."""
+    out: set[int] = set()
+    for lab, text in labels.items():
+        low = " " + text.lower() + " "
+        for kw in COMMERCIAL_LABEL_KEYWORDS:
+            if kw in low:
+                out.add(int(lab))
+                break
     return out
 
 
@@ -1081,29 +1212,37 @@ def write_grid_report(
     violations: list[dict],
     chunks: list[ActiveChunk],
     cluster_labels: dict[int, str],
+    commercial_labels: set[int],
 ) -> None:
     paper_lccn = _lookup_paper_lccn_by_id(chunks)
 
     total = len(slots)
-    regular = [
-        s for s in slots.values()
-        if s["top_label_share"] >= GRID_REGULAR_THRESHOLD
-        and s["sample_size"] >= GRID_MIN_SAMPLES_FOR_REGULAR
-    ]
+    regular = [s for s in slots.values() if s.get("is_regular")]
+    reg_commercial = [s for s in regular if s.get("is_commercial")]
+    reg_editorial = [s for s in regular if not s.get("is_commercial")]
     reg_frac = (len(regular) / total) if total else 0.0
 
     lines: list[str] = []
     lines.append("# Recovery: layout grid report")
     lines.append("")
     lines.append(f"Total slots: **{total:,}**")
-    lines.append(f"Regular slots (share ≥ {GRID_REGULAR_THRESHOLD}, "
-                 f"sample ≥ {GRID_MIN_SAMPLES_FOR_REGULAR}): "
-                 f"**{len(regular):,}** ({reg_frac:.1%})")
+    lines.append(
+        f"Regular slots (share ≥ {GRID_REGULAR_THRESHOLD}, "
+        f"sample ≥ {GRID_MIN_SAMPLES_FOR_REGULAR}): "
+        f"**{len(regular):,}** ({reg_frac:.1%}) — "
+        f"**{len(reg_commercial)} commercial** (negative grid sign), "
+        f"**{len(reg_editorial)} editorial** (positive grid sign)."
+    )
+    lines.append("")
+    lines.append("Grid contribution to relevance_prior:")
+    lines.append("- regular + commercial → −share (deprioritize)")
+    lines.append("- regular + editorial → +share (boost)")
+    lines.append("- sub-threshold → 0")
     lines.append("")
     lines.append(f"## Top {GRID_REPORT_TOP_N} most regular slots")
     lines.append("")
-    lines.append("| paper | page | bucket | top label | share | n |")
-    lines.append("| --- | ---: | ---: | --- | ---: | ---: |")
+    lines.append("| paper | page | bucket | top label | share | n | class | signed |")
+    lines.append("| --- | ---: | ---: | --- | ---: | ---: | --- | ---: |")
     top = sorted(
         regular,
         key=lambda s: (-s["top_label_share"], -s["sample_size"]),
@@ -1111,10 +1250,32 @@ def write_grid_report(
     for s in top:
         lccn = paper_lccn.get(s["paper_id"], "?")
         label_str = _label_str(cluster_labels, s["top_label"])
+        cls = "commercial" if s["is_commercial"] else "editorial"
+        signed = f"{s['signed_share']:+.2f}"
         lines.append(
             f"| {lccn} | {s['page_sequence']} | {s['position_bucket']} | "
-            f"{label_str} | {s['top_label_share']:.2f} | {s['sample_size']} |"
+            f"{label_str} | {s['top_label_share']:.2f} | {s['sample_size']} | "
+            f"{cls} | {signed} |"
         )
+    # Surface the commercial classifier so the operator can audit.
+    if commercial_labels:
+        commercial_with_text = sorted(
+            [(lab, cluster_labels.get(lab, "")) for lab in commercial_labels
+             if cluster_labels.get(lab)],
+            key=lambda kv: kv[0],
+        )
+        lines.append("")
+        lines.append(f"## Commercial classifier ({len(commercial_labels)} clusters flagged)")
+        lines.append("")
+        lines.append(
+            f"Heuristic: label_text contains any of {list(COMMERCIAL_LABEL_KEYWORDS)}. "
+            "Tunable at the top of scripts/recovery_score.py."
+        )
+        lines.append("")
+        for lab, text in commercial_with_text[:40]:
+            lines.append(f"- #{lab} — {text}")
+        if len(commercial_with_text) > 40:
+            lines.append(f"- … and {len(commercial_with_text) - 40} more.")
     lines.append("")
     lines.append(f"## Grid-violation days ({len(violations):,} total)")
     lines.append("")
@@ -1210,9 +1371,10 @@ def write_top_candidates(
     lines.append(f"# Recovery: top {TOP_CANDIDATES_N} quarantined candidates")
     lines.append("")
     lines.append(
-        "Composite = relevance_prior × recoverability × gap_bonus. "
+        "Composite = max(0, relevance_prior + W_RECOVER × recoverability) × gap_bonus. "
         f"Weights: entity={W_ENTITY}, grid={W_GRID}, footprint={W_FOOTPRINT}, "
-        f"proximity={W_PROXIMITY}. Gap bonus: {GAP_BONUS}×."
+        f"proximity={W_PROXIMITY}, recover={W_RECOVER}. Gap bonus: {GAP_BONUS}×. "
+        "Grid contribution is signed: negative for commercial slots."
     )
     lines.append("")
     for i, r in enumerate(ranked, 1):
@@ -1234,9 +1396,10 @@ def write_top_candidates(
                 f"{r['best_entity']} ({r['best_entity_similarity']:.2f})"
             )
         if r["grid_section_guess"] is not None:
+            sign = "−" if r["grid_confidence"] < 0 else "+"
             reasons.append(
-                f"grid says {_label_str(cluster_labels, r['grid_section_guess'])} "
-                f"({r['grid_confidence']:.2f})"
+                f"grid {sign} {_label_str(cluster_labels, r['grid_section_guess'])} "
+                f"({r['grid_confidence']:+.2f})"
             )
         if r["weighted_proximity"] > 0.1:
             reasons.append(
@@ -1249,15 +1412,15 @@ def write_top_candidates(
         lines.append("")
         lines.append(f"- recovery_value = **{r['recovery_value']:.4f}**")
         lines.append(
-            f"  - relevance_prior = {r['relevance_prior']:.4f}"
-            f" (entity {r['entity_match_score']:.2f}"
-            f", grid {r['grid_confidence']:.2f}"
-            f", footprint {r['footprint_score']:.2f}"
-            f", proximity {r['weighted_proximity']:.2f})"
+            f"  - relevance_prior = {r['relevance_prior']:+.4f}"
+            f" (entity {r['entity_match_score']:+.2f}"
+            f", grid {r['grid_confidence']:+.2f}"
+            f", footprint {r['footprint_score']:+.2f}"
+            f", proximity {r['weighted_proximity']:+.2f})"
         )
         lines.append(
-            f"  - recoverability (quality) = {r['recoverability']:.2f}"
-            f"; gap_bonus = {r['gap_bonus']:.1f}"
+            f"  - recoverability (quality, additive) = {r['recoverability']:.2f}"
+            f"; gap_bonus = {r['gap_bonus']:.1f}×"
         )
         lines.append(f"- reason: {reason_line}")
         lines.append(f"- [LoC page]({loc_url})")
