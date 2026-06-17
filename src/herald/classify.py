@@ -142,9 +142,17 @@ class QualityScores:
         return asdict(self)
 
 
-# Quarantine thresholds. dict_word_ratio is the primary signal; the
-# structural checks catch garbage that doesn't match the dictionary at
-# all. The bar used to require BOTH a low dict ratio AND a structural
+# Quarantine thresholds. dict_word_ratio is the primary signal.
+#
+# What `quarantined` actually means: the OCR is unreadable enough that
+# embedding / FTS retrieval on it returns noise. It does NOT mean the
+# chunk is lost — every quarantined chunk has a LoC page link, and a
+# historian can click through to read the original image. The Phase A
+# recovery targeting system surfaces them for that purpose. So
+# "quarantine" is about hiding garbage from machine-driven RAG, not
+# about discarding the source.
+#
+# The bar used to require BOTH a low dict ratio AND a structural
 # break, which was too lenient — most damaged OCR has decent word
 # lengths and reasonable alpha-ratio, so it failed the structural
 # check and stayed active. The new bar: anything below
@@ -153,7 +161,12 @@ class QualityScores:
 # QUARANTINE_DICT_RATIO_SOFT.
 QUARANTINE_DICT_RATIO = 0.18
 QUARANTINE_DICT_RATIO_SOFT = 0.28
-RECOVERY_CANDIDATE_DICT_RATIO = 0.40
+# Above the quarantine bar but still marginal: a sizeable fraction of
+# the text is unreadable, which makes the embedding noisy and may
+# have put the chunk in the wrong cluster. These are flagged as
+# REASSIGNMENT candidates — a human or a later pass might want to
+# review where they actually belong, not necessarily re-OCR them.
+REASSIGNMENT_CANDIDATE_DICT_RATIO = 0.40
 
 
 def compute_quality_scores(content: str) -> QualityScores:
@@ -203,12 +216,17 @@ def classify_quality(scores: QualityScores) -> tuple[str, str | None]:
       - dict_ratio < QUARANTINE_DICT_RATIO   → quarantine (unconditional)
       - dict_ratio < QUARANTINE_DICT_RATIO_SOFT AND structurally weak
                                              → quarantine
-      - dict_ratio < RECOVERY_CANDIDATE_DICT_RATIO → recovery_candidate (active)
+      - dict_ratio < REASSIGNMENT_CANDIDATE_DICT_RATIO
+                                             → 'reassignment_candidate' (active)
       - otherwise                            → active
 
-    Structural weakness is a softer check than before — readable
-    1840s English with a names-heavy section can still pass when its
-    dict ratio is above the hard floor.
+    Note on reasons: 'quarantined' chunks aren't lost — every one has
+    a LoC page link and the historian can click through to read the
+    image. The Phase A recovery targeting system surfaces them for
+    that purpose. 'reassignment_candidate' chunks have enough
+    intelligible text to be useful but enough OCR noise that their
+    embedding may have placed them in the wrong cluster; the name
+    reflects the review they may benefit from, not OCR recovery.
 
     Returns (status, reason). reason may be None for clean chunks.
     """
@@ -221,13 +239,16 @@ def classify_quality(scores: QualityScores) -> tuple[str, str | None]:
         or scores.non_alpha_ratio > 0.5
     )
 
-    # Hard floor: below this, we can't read the chunk no matter what.
+    # Hard floor: below this we can't read the chunk no matter what.
+    # 'ocr_illegible' replaces the old 'garbage_ocr' — these chunks
+    # aren't garbage to the historian (the LoC image is intact); they
+    # just don't yield enough machine-readable text for RAG.
     if scores.dict_word_ratio < QUARANTINE_DICT_RATIO:
-        return ("quarantined", "garbage_ocr")
+        return ("quarantined", "ocr_illegible")
     # Soft floor: weakly readable, but also structurally suspect.
     if scores.dict_word_ratio < QUARANTINE_DICT_RATIO_SOFT and structurally_weak:
-        return ("quarantined", "garbage_ocr")
-    # Active but flagged for re-OCR follow-up.
-    if scores.dict_word_ratio < RECOVERY_CANDIDATE_DICT_RATIO:
-        return ("active", "recovery_candidate")
+        return ("quarantined", "ocr_illegible")
+    # Active but enough noise that cluster placement may be wrong.
+    if scores.dict_word_ratio < REASSIGNMENT_CANDIDATE_DICT_RATIO:
+        return ("active", "reassignment_candidate")
     return ("active", None)

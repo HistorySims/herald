@@ -35,10 +35,10 @@ def main() -> None:
     summary = score_all(cfg.supabase_db_url, on_progress=print)
 
     print()
-    print(f"  total scored:        {summary.total:,}")
-    print(f"  quarantined:         {summary.quarantined:,}")
-    print(f"  recovery candidates: {summary.recovery_candidates:,}")
-    print(f"  clean active:        {summary.active_clean:,}")
+    print(f"  total scored:              {summary.total:,}")
+    print(f"  quarantined:               {summary.quarantined:,}")
+    print(f"  reassignment candidates:   {summary.reassignment_candidates:,}")
+    print(f"  clean active:              {summary.active_clean:,}")
     if summary.quarantined_reasons:
         print("  quarantine reasons:")
         for reason, n in sorted(
