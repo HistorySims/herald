@@ -24,7 +24,8 @@ on:
       dry_run:
         description: "Report counts only; do not write to the database"
         required: false
-        default: "false"
+        type: boolean
+        default: false
 
 jobs:
   revert:
@@ -47,7 +48,11 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          # Bash string comparison is case-sensitive and GitHub passes
+          # boolean inputs as "true"/"false" (proper boolean type) or
+          # "True"/"False" (string fallback). Normalize before testing.
+          DRY=$(printf '%s' "${{ inputs.dry_run }}" | tr '[:upper:]' '[:lower:]')
+          if [ "$DRY" = "true" ]; then
             uv run scripts/revert_cluster_refused.py --dry-run
           else
             uv run scripts/revert_cluster_refused.py
