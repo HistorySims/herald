@@ -143,10 +143,17 @@ class QualityScores:
 
 
 # Quarantine thresholds. dict_word_ratio is the primary signal; the
-# structural checks (very-short or very-long avg word, mostly-non-alpha
-# content) catch garbage that doesn't match the dictionary at all.
-QUARANTINE_DICT_RATIO = 0.15
-RECOVERY_CANDIDATE_DICT_RATIO = 0.35
+# structural checks catch garbage that doesn't match the dictionary at
+# all. The bar used to require BOTH a low dict ratio AND a structural
+# break, which was too lenient — most damaged OCR has decent word
+# lengths and reasonable alpha-ratio, so it failed the structural
+# check and stayed active. The new bar: anything below
+# QUARANTINE_DICT_RATIO is quarantined regardless of structure; the
+# structural check now adds a second-stage gate up to
+# QUARANTINE_DICT_RATIO_SOFT.
+QUARANTINE_DICT_RATIO = 0.18
+QUARANTINE_DICT_RATIO_SOFT = 0.28
+RECOVERY_CANDIDATE_DICT_RATIO = 0.40
 
 
 def compute_quality_scores(content: str) -> QualityScores:
@@ -191,30 +198,36 @@ def compute_quality_scores(content: str) -> QualityScores:
 def classify_quality(scores: QualityScores) -> tuple[str, str | None]:
     """Map continuous scores → (status, reason).
 
-    - Structural garbage (very short / very long avg word, mostly
-      non-alpha) ALWAYS quarantines, regardless of dict ratio. Catches
-      chunks like "M c i l l e h t e r" or pure punctuation salad.
-    - Low dict ratio + no structural failure → 'recovery_candidate':
-      could be names, foreign words, period-specific terms. Stays active.
-    - Mid dict ratio → 'recovery_candidate' but still active.
-    - High dict ratio → fully active.
+    Two-stage bar so unreadable-but-structurally-normal chunks don't
+    leak into RAG:
+      - dict_ratio < QUARANTINE_DICT_RATIO   → quarantine (unconditional)
+      - dict_ratio < QUARANTINE_DICT_RATIO_SOFT AND structurally weak
+                                             → quarantine
+      - dict_ratio < RECOVERY_CANDIDATE_DICT_RATIO → recovery_candidate (active)
+      - otherwise                            → active
+
+    Structural weakness is a softer check than before — readable
+    1840s English with a names-heavy section can still pass when its
+    dict ratio is above the hard floor.
 
     Returns (status, reason). reason may be None for clean chunks.
     """
     if scores.word_count < 3:
         return ("quarantined", "too_short")
 
-    structurally_broken = (
-        scores.avg_word_len < 1.5
-        or scores.avg_word_len > 18.0
-        or scores.non_alpha_ratio > 0.6
+    structurally_weak = (
+        scores.avg_word_len < 2.0
+        or scores.avg_word_len > 16.0
+        or scores.non_alpha_ratio > 0.5
     )
 
-    if scores.dict_word_ratio < QUARANTINE_DICT_RATIO and structurally_broken:
-        return ("quarantined", "garbage_ocr")
+    # Hard floor: below this, we can't read the chunk no matter what.
     if scores.dict_word_ratio < QUARANTINE_DICT_RATIO:
-        # low dict but structurally OK → names / numbers / non-English
-        return ("active", "recovery_candidate")
+        return ("quarantined", "garbage_ocr")
+    # Soft floor: weakly readable, but also structurally suspect.
+    if scores.dict_word_ratio < QUARANTINE_DICT_RATIO_SOFT and structurally_weak:
+        return ("quarantined", "garbage_ocr")
+    # Active but flagged for re-OCR follow-up.
     if scores.dict_word_ratio < RECOVERY_CANDIDATE_DICT_RATIO:
         return ("active", "recovery_candidate")
     return ("active", None)
