@@ -87,24 +87,34 @@ W_PROXIMITY = 0.25
 # quality ≈ 0.01–0.04 on this population zeroed the composite. Keep
 # quality as a tie-breaker the user can read in the breakdown.
 W_RECOVER = 0.10
+# Cluster commerciality bias — directly added to relevance_prior
+# regardless of slot regularity. The grid signal only fires for the
+# few slots dense enough to be "regular" (7 out of 48 in this corpus),
+# which misses the majority of commercial-cluster chunks. This term
+# applies the commercial/editorial judgment cluster-wide:
+#   - commercial cluster → -1.0 signal
+#   - cluster with a real (non-refusal) label → +0.5 signal
+#   - unlabeled / too-small-to-label cluster → 0 (neutral)
+# Effective magnitude per chunk = W_COMMERCIALITY × signal.
+W_COMMERCIALITY = 0.20
 # Grid sign: clusters labeled with these substrings are treated as
-# non-substantive (ads, prices, schedules, legal notices). A regular
-# slot whose top label is commercial contributes NEGATIVELY to
-# relevance_prior — a dark chunk in the steamboat-schedule slot
-# should be deprioritized, not boosted. Editorial regular slots
-# contribute positively. Sub-threshold (irregular) slots contribute
-# zero, in either direction.
+# non-substantive (ads, prices, schedules, legal notices, etc.).
+# Substring matched against ' ' + label.lower() + ' ' so leading-/
+# trailing-bounded variants like ' ad ' match a standalone "ad" but
+# not "masthead" or "broadcast". Each entry must include its own
+# whitespace boundaries when whole-word semantics are required;
+# unbounded substrings (e.g. "advertis") still catch inflections.
 COMMERCIAL_LABEL_KEYWORDS = (
     "advertisement", "advertis",     # advertisements, advertising
-    "ad ",                            # standalone "ad" (with trailing space)
-    "price", "prices", "commodity", "market report",
-    "schedule", "rates",
-    "legal notice", "notice", "mortgage", "attachment", "foreclosure",
-    "debtor", "summons",
-    "retail", "sale ", "sales",
-    "testimonial", "patent medicine", "remedy", "remedies",
+    " ad ", " ads ",                  # standalone — boundary-bounded
+    " price ", " prices ", "commodity", "market report",
+    "schedule", " rates ",
+    "legal notice", " notice ", "mortgage", " attachment ",
+    "foreclosure", "debtor", "summons",
+    " retail ", " sale ", " sales ",
+    "testimonial", "patent medicine", " remedy", "remedies",
     "insurance company",
-    "hotel",
+    " hotel",
 )
 
 # Diagnostic file knobs
@@ -213,6 +223,8 @@ def main() -> None:
         proximity = compute_proximity(quarantined, centroids)
 
         print("A7 — assembling composite scores...")
+        chunk_to_cluster_t0 = _load_quarantined_cluster_t0(conn, run_id)
+        labeled_cluster_labels = set(all_labels_by_t0.keys())
         per_chunk = assemble_recovery(
             quarantined=quarantined,
             matches=matches,
@@ -220,6 +232,9 @@ def main() -> None:
             footprints=footprints,
             gaps=gaps,
             proximity=proximity,
+            commercial_labels=commercial_labels,
+            labeled_cluster_labels=labeled_cluster_labels,
+            chunk_to_cluster_t0=chunk_to_cluster_t0,
         )
         print(f"  {len(per_chunk):,} chunk_recovery rows")
         _write_chunk_recovery(conn, per_chunk)
@@ -386,6 +401,37 @@ def _load_quarantined_chunks(
                 embedding=emb,
                 quality=float(r[10]) if r[10] is not None else 0.0,
             ))
+    conn.commit()
+    return out
+
+
+def _load_quarantined_cluster_t0(
+    conn: psycopg.Connection, run_id: UUID,
+) -> dict[UUID, int]:
+    """Map quarantined chunk_id → its tier-0 cluster label.
+
+    Quarantined chunks aren't returned by _load_active_chunks (that
+    filters status='active'), but their cluster assignments still
+    live on chunk_projections. The commerciality bias and gap-bonus
+    gate both need cluster_t0 per chunk, regardless of status.
+    """
+    out: dict[UUID, int] = {}
+    with conn.cursor(name="quarantined_cluster_t0") as cur:
+        cur.itersize = 5000
+        cur.execute(
+            """
+            SELECT cp.chunk_id, cp.cluster_t0
+              FROM chunk_projections cp
+              JOIN chunks ON chunks.id = cp.chunk_id
+             WHERE cp.run_id = %s
+               AND chunks.status = 'quarantined'
+               AND chunks.is_current = true
+            """,
+            (run_id,),
+        )
+        for chunk_id, t0 in cur:
+            cid = chunk_id if isinstance(chunk_id, UUID) else UUID(str(chunk_id))
+            out[cid] = int(t0)
     conn.commit()
     return out
 
@@ -876,6 +922,9 @@ def assemble_recovery(
     footprints: dict[int, ClusterFootprint],
     gaps: dict[UUID, int],
     proximity: dict[UUID, dict],
+    commercial_labels: set[int],
+    labeled_cluster_labels: set[int],
+    chunk_to_cluster_t0: dict[UUID, int],
 ) -> list[dict]:
     rows: list[dict] = []
     for q in quarantined:
@@ -934,21 +983,46 @@ def assemble_recovery(
             nearest_distance = None
             weighted_proximity = 0.0
 
+        # Commerciality bias from the chunk's own cluster_t0,
+        # independent of slot regularity. Catches commercial-cluster
+        # chunks that the grid signal misses (e.g. sn83030313 page 4
+        # buckets that don't cross the 0.60 regularity threshold).
+        chunk_cluster = chunk_to_cluster_t0.get(q.id)
+        if chunk_cluster is None or chunk_cluster < 0:
+            commerciality_signal = 0.0
+        elif chunk_cluster in commercial_labels:
+            commerciality_signal = -1.0
+        elif chunk_cluster in labeled_cluster_labels:
+            commerciality_signal = +0.5
+        else:
+            commerciality_signal = 0.0
+
         # Grid contributes signed (commercial slots subtract).
+        # Commerciality is the cluster-level analog — works whether
+        # or not the chunk's slot is regular.
         relevance_prior = (
             W_ENTITY * entity_score
             + W_GRID * grid_confidence
             + W_FOOTPRINT * footprint_score
             + W_PROXIMITY * weighted_proximity
+            + W_COMMERCIALITY * commerciality_signal
         )
         recoverability = max(0.0, min(1.0, q.quality))
         gap_label = gaps.get(q.id)
-        gap_bonus = GAP_BONUS if gap_label is not None else 1.0
+        # Gap bonus only for non-commercial clusters. A missing day in
+        # steamboat schedules isn't a target a historian cares about —
+        # doubling its score on every quarantined chunk in that slot
+        # was the main reason the previous run's top-20 was wall-to-
+        # wall commercial dark matter.
+        gap_is_substantive = (
+            gap_label is not None and gap_label not in commercial_labels
+        )
+        gap_bonus = GAP_BONUS if gap_is_substantive else 1.0
         # Recoverability is ADDITIVE (not a multiplier) — Checkpoint-1
         # showed the multiplicative form crushed every chunk on a
         # population with q≈0.01–0.04. max(0, …) floor so a strongly
-        # negative grid signal can pull a hopeless candidate to zero
-        # without dragging the composite below.
+        # negative grid/commerciality signal can pull a hopeless
+        # candidate to zero without dragging the composite below.
         recovery_value = max(0.0, relevance_prior + W_RECOVER * recoverability) * gap_bonus
 
         rows.append({
@@ -966,6 +1040,8 @@ def assemble_recovery(
             "nearest_cluster_label": nearest_label,
             "nearest_distance": nearest_distance,
             "weighted_proximity": weighted_proximity,
+            "commerciality_signal": commerciality_signal,
+            "chunk_cluster_t0": chunk_cluster,
             "relevance_prior": relevance_prior,
             "recoverability": recoverability,
             "gap_bonus": gap_bonus,
@@ -1373,8 +1449,10 @@ def write_top_candidates(
     lines.append(
         "Composite = max(0, relevance_prior + W_RECOVER × recoverability) × gap_bonus. "
         f"Weights: entity={W_ENTITY}, grid={W_GRID}, footprint={W_FOOTPRINT}, "
-        f"proximity={W_PROXIMITY}, recover={W_RECOVER}. Gap bonus: {GAP_BONUS}×. "
-        "Grid contribution is signed: negative for commercial slots."
+        f"proximity={W_PROXIMITY}, commerciality={W_COMMERCIALITY}, "
+        f"recover={W_RECOVER}. Gap bonus: {GAP_BONUS}× — fires ONLY when "
+        "the gap cluster is non-commercial. Grid and commerciality are "
+        "signed: negative for commercial clusters/slots."
     )
     lines.append("")
     for i, r in enumerate(ranked, 1):
@@ -1406,6 +1484,14 @@ def write_top_candidates(
                 f"semantic prox to {_label_str(cluster_labels, r['nearest_cluster_label'])} "
                 f"({1.0 - (r['nearest_distance'] or 0):.2f})"
             )
+        if r.get("commerciality_signal", 0.0) != 0.0:
+            sign = "−" if r["commerciality_signal"] < 0 else "+"
+            kind = "commercial cluster" if r["commerciality_signal"] < 0 else "editorial cluster"
+            cluster_t0 = r.get("chunk_cluster_t0")
+            if cluster_t0 is not None and cluster_t0 >= 0:
+                reasons.append(
+                    f"{kind} {sign} {_label_str(cluster_labels, cluster_t0)}"
+                )
         reason_line = "; ".join(reasons) if reasons else "(only quality-weighted prior)"
 
         lines.append(f"### {i}. {q.lccn} {q.date_issued} p.{q.page_sequence} bucket {q.position_bucket}")
@@ -1416,7 +1502,8 @@ def write_top_candidates(
             f" (entity {r['entity_match_score']:+.2f}"
             f", grid {r['grid_confidence']:+.2f}"
             f", footprint {r['footprint_score']:+.2f}"
-            f", proximity {r['weighted_proximity']:+.2f})"
+            f", proximity {r['weighted_proximity']:+.2f}"
+            f", commerciality {r.get('commerciality_signal', 0.0):+.2f})"
         )
         lines.append(
             f"  - recoverability (quality, additive) = {r['recoverability']:.2f}"
