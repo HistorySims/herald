@@ -37,8 +37,11 @@ out/
 .DS_Store
 Thumbs.db
 
-# Local data / scratch
-/data/
+# Local data / scratch — but the frozen recovery-eval set is
+# version-controlled on purpose (labels reviewed at Gate 2; tuning
+# must run against exactly these files).
+/data/*
+!/data/recovery_eval/
 /tmp/
 *.sqlite
 *.db
