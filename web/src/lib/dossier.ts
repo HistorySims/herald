@@ -42,6 +42,12 @@ export interface DossierCluster {
   date_min: string;
   date_max: string;
   papers: PaperShare[];
+  // Percentile ranks (0..1) vs all same-tier clusters with active
+  // members — the context that answers "is that a lot of drift?".
+  // Optional: older API deploys won't send them.
+  burstiness_pct?: number | null;
+  drift_net_pct?: number | null;
+  drift_ratio_pct?: number | null;
 }
 
 export interface DossierResponse {
@@ -75,7 +81,29 @@ export function qualityOpacity(q: number): number {
 }
 
 export function shortPaperName(title: string): string {
-  return title.replace(/\s*\(.*?\)\s*/g, "").trim();
+  // "the new york herald (new york [n.y.]) 1840-1920"
+  //   → "The New York Herald". Strip parentheticals (with a space, so
+  // words don't fuse), trailing year ranges, then title-case.
+  return title
+    .replace(/\s*\(.*?\)\s*/g, " ")
+    .replace(/\s*\d{4}\s*-\s*\d{4}\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+// "0.62 → 62nd" — percentile rank formatted for a readout line.
+export function ordinal(pct: number): string {
+  const n = Math.round(pct * 100);
+  const rem10 = n % 10;
+  const rem100 = n % 100;
+  const suffix =
+    rem100 >= 11 && rem100 <= 13 ? "th"
+      : rem10 === 1 ? "st"
+      : rem10 === 2 ? "nd"
+      : rem10 === 3 ? "rd"
+      : "th";
+  return `${n}${suffix}`;
 }
 
 // Monday of the ISO week for a YYYY-MM-DD string. Matches the Python
