@@ -74,21 +74,19 @@ export default function ClusterDossierPage() {
     setWeekIndex(i);
   }, []);
 
-  // On release, line the feed up with the chosen week so when the
-  // historian scrolls down to read, they're already on the right card.
-  // The scroll-spy guard suppresses the rebound during the smooth
-  // scroll.
-  const handleWeekCommit = useCallback(
-    (i: number) => {
-      const wk = data?.weeks[i]?.week_start;
-      if (!wk) return;
-      lastScrubAt.current = Date.now();
-      weekEls.current
-        .get(wk)
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    },
-    [data],
-  );
+  // Releasing the scrubber never scrolls the page (auto-scroll on
+  // release kept yanking users to the bottom). Instead the matching
+  // week divider in the feed is highlighted, and this explicit jump —
+  // wired to the "↓ evidence" button beside the scrubber — scrolls
+  // only when tapped. The scroll-spy guard suppresses the rebound.
+  const handleJumpToWeek = useCallback(() => {
+    const wk = data?.weeks[weekIndex]?.week_start;
+    if (!wk) return;
+    lastScrubAt.current = Date.now();
+    weekEls.current
+      .get(wk)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [data, weekIndex]);
 
   // Feed → scrubber (scroll-spy): watch week dividers; the divider
   // nearest the top of the viewport sets the scrub position, unless a
@@ -228,9 +226,11 @@ export default function ClusterDossierPage() {
             chunks={data.chunks}
             driftNet={cluster.drift_net}
             driftRatio={cluster.drift_ratio}
+            driftNetPct={cluster.drift_net_pct}
+            driftRatioPct={cluster.drift_ratio_pct}
             weekIndex={Math.min(weekIndex, Math.max(0, data.weeks.length - 1))}
             onWeekChange={handleWeekChange}
-            onWeekCommit={handleWeekCommit}
+            onJumpToWeek={handleJumpToWeek}
           />
 
           <div className="pt-4">
@@ -243,6 +243,7 @@ export default function ClusterDossierPage() {
               starred={starred}
               onToggleStar={toggleStar}
               registerWeekEl={registerWeekEl}
+              activeWeek={data.weeks[weekIndex]?.week_start ?? null}
             />
           </div>
         </>

@@ -21,6 +21,10 @@ interface Props {
   starred: Set<string>;
   onToggleStar: (chunkId: string) => void;
   registerWeekEl: (weekStart: string, el: HTMLDivElement | null) => void;
+  // Week currently selected on the anatomy scrubber — its divider is
+  // highlighted so the scrubber and the feed stay visibly linked
+  // without any auto-scrolling.
+  activeWeek?: string | null;
 }
 
 export function EvidenceFeed({
@@ -29,6 +33,7 @@ export function EvidenceFeed({
   starred,
   onToggleStar,
   registerWeekEl,
+  activeWeek,
 }: Props) {
   const paperIdx = useMemo(() => {
     const m = new Map<string, number>();
@@ -65,16 +70,28 @@ export function EvidenceFeed({
 
   return (
     <div>
-      {byWeek.map((group) => (
+      {byWeek.map((group) => {
+        const isActive = group.week === activeWeek;
+        return (
         <section key={group.week}>
           <div
             ref={(el) => registerWeekEl(group.week, el)}
             data-week={group.week}
-            className="sticky top-0 z-10 bg-stone-950/95 backdrop-blur-sm py-1.5 border-b border-stone-800"
+            className={`sticky top-0 z-10 bg-stone-950/95 backdrop-blur-sm py-1.5 border-b ${
+              isActive
+                ? "border-amber-400/70 pl-2 border-l-2"
+                : "border-stone-800"
+            }`}
           >
-            <h3 className="text-[11px] uppercase tracking-wide text-stone-400">
+            <h3
+              className={`text-[11px] uppercase tracking-wide ${
+                isActive ? "text-amber-300" : "text-stone-400"
+              }`}
+            >
               {formatWeekLabel(group.week)}
-              <span className="text-stone-600"> · {group.items.length}</span>
+              <span className={isActive ? "text-amber-500/70" : "text-stone-600"}>
+                {" "}· {group.items.length}
+              </span>
             </h3>
           </div>
 
@@ -95,7 +112,9 @@ export function EvidenceFeed({
                           className="inline-block w-2 h-2 rounded-full flex-shrink-0 self-center"
                           style={{ backgroundColor: color }}
                         />
-                        <span className="text-stone-300">{ch.date}</span>
+                        <span className="text-stone-300 whitespace-nowrap flex-shrink-0">
+                          {ch.date}
+                        </span>
                         <span className="truncate">
                           {shortPaperName(ch.paper_title)}
                         </span>
@@ -128,7 +147,7 @@ export function EvidenceFeed({
                         href={ch.loc_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-[10px] px-2 py-1.5 rounded border border-stone-700 text-amber-400 active:bg-stone-800 whitespace-nowrap"
+                        className="text-[10px] px-2.5 py-1.5 rounded-full ring-1 ring-stone-700 text-amber-400 active:bg-stone-800 whitespace-nowrap"
                       >
                         LoC →
                       </a>
@@ -139,7 +158,8 @@ export function EvidenceFeed({
             })}
           </ul>
         </section>
-      ))}
+        );
+      })}
     </div>
   );
 }

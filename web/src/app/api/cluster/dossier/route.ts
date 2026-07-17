@@ -239,6 +239,9 @@ async function buildDossier(id: string): Promise<Response> {
       date_min: c.active_date_min ?? c.date_min ?? "",
       date_max: c.active_date_max ?? c.date_max ?? "",
       papers: paperShares,
+      burstiness_pct: shape.burstiness_pct,
+      drift_net_pct: shape.drift_net_pct,
+      drift_ratio_pct: shape.drift_ratio_pct,
     },
     weeks,
     chunks,
@@ -302,10 +305,20 @@ function deriveWeeksFromChunks(chunks: DossierChunk[]): DossierWeek[] {
     });
 }
 
+interface ShapeAndPcts {
+  tag: string;
+  explanation: string;
+  // 0..1 percentile ranks vs same-tier active clusters — surfaced to
+  // the UI so "net drift 0.273" can carry "62nd pctile" context.
+  burstiness_pct: number | null;
+  drift_net_pct: number | null;
+  drift_ratio_pct: number | null;
+}
+
 async function computeShape(
   supabase: ReturnType<typeof getSupabase>,
   c: ClusterDbRow,
-): Promise<{ tag: string; explanation: string }> {
+): Promise<ShapeAndPcts> {
   // Percentile distributions over same-tier, same-run clusters with
   // active members — the same population the brief's shape tags use.
   const { data, error } = await supabase
@@ -316,6 +329,7 @@ async function computeShape(
   const burstDist: number[] = [];
   const ratioDist: number[] = [];
   const cumDist: number[] = [];
+  const netDist: number[] = [];
   let corpusWeeks = 0;
   if (!error && data) {
     for (const row of data as {
@@ -327,6 +341,7 @@ async function computeShape(
     }[]) {
       if (row.active_size !== null && row.active_size <= 0) continue;
       if (row.burstiness !== null) burstDist.push(row.burstiness);
+      if (row.drift_net !== null) netDist.push(row.drift_net);
       if (
         row.drift_cumulative !== null &&
         row.drift_cumulative > 1e-9 &&
@@ -343,14 +358,21 @@ async function computeShape(
   burstDist.sort((a, b) => a - b);
   ratioDist.sort((a, b) => a - b);
   cumDist.sort((a, b) => a - b);
+  netDist.sort((a, b) => a - b);
 
   const ratio =
     c.drift_cumulative && c.drift_cumulative > 1e-9
       ? Math.min(1, (c.drift_net ?? 0) / c.drift_cumulative)
       : null;
-  return deriveShapeTag({
-    burstiness_pct: percentileRank(c.burstiness ?? 0, burstDist),
-    ratio_pct: ratio !== null ? percentileRank(ratio, ratioDist) : 0,
+  const burstiness_pct = percentileRank(c.burstiness ?? 0, burstDist);
+  const drift_ratio_pct =
+    ratio !== null ? percentileRank(ratio, ratioDist) : null;
+  const drift_net_pct =
+    c.drift_net !== null ? percentileRank(c.drift_net, netDist) : null;
+
+  const shape = deriveShapeTag({
+    burstiness_pct,
+    ratio_pct: drift_ratio_pct ?? 0,
     cum_pct:
       c.drift_cumulative !== null
         ? percentileRank(c.drift_cumulative, cumDist)
@@ -358,4 +380,5 @@ async function computeShape(
     weeks: c.drift_weeks ?? 0,
     corpus_weeks: corpusWeeks,
   });
+  return { ...shape, burstiness_pct, drift_net_pct, drift_ratio_pct };
 }
