@@ -5,7 +5,7 @@ import { ExploreMap } from "@/components/ExploreMap";
 import { ExploreSidebar } from "@/components/ExploreSidebar";
 import { ChunkDetail } from "@/components/ChunkDetail";
 import { TimeFilter } from "@/components/TimeFilter";
-import { BurstyTopics } from "@/components/BurstyTopics";
+import { StoryShapes, type RankedTopic, type ShapeSort } from "@/components/StoryShapes";
 import { ClusterStory } from "@/components/ClusterStory";
 import { SearchBox } from "@/components/SearchBox";
 import { TimelineMinimap } from "@/components/TimelineMinimap";
@@ -18,7 +18,7 @@ import {
   ChunkDetail as ChunkDetailType,
   ClusterInfo,
 } from "@/lib/explore-data";
-import { computeBurstyTopics, BurstyTopic } from "@/lib/burstiness";
+import { computeTopicStats } from "@/lib/burstiness";
 
 interface DatesData {
   offsets: Uint16Array;
@@ -55,6 +55,7 @@ export default function ExplorePage() {
   );
   const [searchMatches, setSearchMatches] = useState<Set<number> | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [shapeSort, setShapeSort] = useState<ShapeSort>("bursty");
   const storyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -161,17 +162,39 @@ export default function ExplorePage() {
     return `${selectedChunk.date_issued} · ${paperShort}`;
   }, [selectedChunk]);
 
-  const burstyTopics = useMemo<BurstyTopic[]>(() => {
+  // All clusters at the tier meeting the size floor, with their
+  // temporal stats merged with DB drift geometry, ranked by the
+  // selected story-shape metric. Top 8.
+  const rankedTopics = useMemo<RankedTopic[]>(() => {
     if (!points || !dates) return [];
-    return computeBurstyTopics(
-      points,
-      dates.offsets,
-      tier,
-      contentFilter,
-      20,
-      8
-    );
-  }, [points, dates, tier, contentFilter]);
+    const stats = computeTopicStats(points, dates.offsets, tier, contentFilter, 20);
+    const rows: RankedTopic[] = [];
+    for (const t of stats.values()) {
+      const info = clusterInfo.get(t.cluster);
+      const driftNet = info?.drift_net ?? null;
+      const driftCum = info?.drift_cumulative ?? null;
+      const driftRatio =
+        driftNet !== null && driftCum !== null && driftCum > 1e-9
+          ? Math.min(1, driftNet / driftCum)
+          : null;
+      rows.push({ ...t, driftNet, driftRatio });
+    }
+
+    const cmp: Record<ShapeSort, (a: RankedTopic, b: RankedTopic) => number> = {
+      bursty: (a, b) => b.burstiness - a.burstiness,
+      // Nulls sink so clusters without drift data don't top the list.
+      drifting: (a, b) => (b.driftNet ?? -1) - (a.driftNet ?? -1),
+      evolving: (a, b) => (b.driftRatio ?? -1) - (a.driftRatio ?? -1),
+    };
+    let ranked = rows.sort(cmp[shapeSort]);
+    if (shapeSort !== "bursty") {
+      // Drop clusters with no value for the active drift metric.
+      ranked = ranked.filter((t) =>
+        shapeSort === "drifting" ? t.driftNet !== null : t.driftRatio !== null
+      );
+    }
+    return ranked.slice(0, 8);
+  }, [points, dates, tier, contentFilter, clusterInfo, shapeSort]);
 
   const handleSearch = useCallback(
     async (q: string) => {
@@ -204,7 +227,7 @@ export default function ExplorePage() {
   }, []);
 
   const handleAskTopic = useCallback(
-    (topic: BurstyTopic) => {
+    (topic: RankedTopic) => {
       setStoryCluster({ tier, label: topic.cluster });
     },
     [tier]
@@ -224,7 +247,7 @@ export default function ExplorePage() {
   }, [points, selectedIndex, tier]);
 
   const handleTopicClick = useCallback(
-    (topic: BurstyTopic) => {
+    (topic: RankedTopic) => {
       if (!dates) return;
       setFocusedCluster(topic.cluster);
       const width =
@@ -431,10 +454,12 @@ export default function ExplorePage() {
             onClear={handleClearSearch}
           />
         </div>
-        {dates && burstyTopics.length > 0 && (
+        {dates && (
           <div className="px-4 pb-4">
-            <BurstyTopics
-              topics={burstyTopics}
+            <StoryShapes
+              topics={rankedTopics}
+              sort={shapeSort}
+              onSortChange={setShapeSort}
               minDate={dates.minDate}
               focusedCluster={focusedCluster}
               clusterLabels={

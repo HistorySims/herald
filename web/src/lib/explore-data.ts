@@ -118,6 +118,10 @@ export interface ClusterInfo {
   date_max: string | null;
   parent_id: string | null;
   label_text: string | null;
+  // Drift geometry (from cluster_recompute). Null on runs that
+  // predate the drift columns or clusters with <2 active weeks.
+  drift_net: number | null;
+  drift_cumulative: number | null;
 }
 
 export interface ChunkDetail {
