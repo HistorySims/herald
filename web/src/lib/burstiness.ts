@@ -22,14 +22,18 @@ export function clusterArrayForTier(
   }
 }
 
-export function computeBurstyTopics(
+/**
+ * Per-cluster temporal stats for EVERY cluster at the tier that meets
+ * the size floor. The bursty ranking is a sort over this; the story-
+ * shape panel's drift rankings join against it for peak-day jumps.
+ */
+export function computeTopicStats(
   points: ExplorePoints,
   dateOffsets: Uint16Array,
   tier: number,
   contentFilter: Set<number>,
-  minClusterSize: number = 20,
-  limit: number = 8
-): BurstyTopic[] {
+  minClusterSize: number = 20
+): Map<number, BurstyTopic> {
   const clusterArr = clusterArrayForTier(points, tier);
 
   const counts = new Map<number, Map<number, number>>();
@@ -46,7 +50,7 @@ export function computeBurstyTopics(
     dayMap.set(day, (dayMap.get(day) ?? 0) + 1);
   }
 
-  const topics: BurstyTopic[] = [];
+  const stats = new Map<number, BurstyTopic>();
   for (const [cluster, dayMap] of counts) {
     const dayCounts = Array.from(dayMap.values());
     const total = dayCounts.reduce((a, b) => a + b, 0);
@@ -68,7 +72,7 @@ export function computeBurstyTopics(
       }
     }
 
-    topics.push({
+    stats.set(cluster, {
       cluster,
       size: total,
       burstiness: cv,
@@ -77,7 +81,21 @@ export function computeBurstyTopics(
       activeDays: dayMap.size,
     });
   }
+  return stats;
+}
 
+export function computeBurstyTopics(
+  points: ExplorePoints,
+  dateOffsets: Uint16Array,
+  tier: number,
+  contentFilter: Set<number>,
+  minClusterSize: number = 20,
+  limit: number = 8
+): BurstyTopic[] {
+  const stats = computeTopicStats(
+    points, dateOffsets, tier, contentFilter, minClusterSize
+  );
+  const topics = Array.from(stats.values());
   topics.sort((a, b) => b.burstiness - a.burstiness);
   return topics.slice(0, limit);
 }
